@@ -25,7 +25,6 @@ use tiny_skia::{Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pi
 use winapi::shared::guiddef::GUID;
 use winapi::shared::minwindef::{BOOL, LPARAM, LRESULT, UINT, WPARAM};
 use winapi::shared::windef::{HDC, HWND, POINT, SIZE};
-use winapi::shared::wtypesbase::CLSCTX_ALL;
 use winapi::um::combaseapi::{CoCreateInstance, CoInitializeEx};
 use winapi::um::endpointvolume::IAudioEndpointVolume;
 use winapi::um::libloaderapi::GetModuleHandleW;
@@ -52,6 +51,9 @@ const BORDER: [u8; 4] = [255, 255, 255, 30];
 // ---------------------------------------------------------------------------
 // VOLUME (Windows Core Audio)
 // ---------------------------------------------------------------------------
+// CLSCTX_ALL = INPROC_SERVER | INPROC_HANDLER | LOCAL_SERVER | REMOTE_SERVER
+const CLSCTX_ALL: u32 = 0x1 | 0x2 | 0x4 | 0x10;
+
 static CLSID_MMDEVICE_ENUMERATOR: GUID = GUID {
     Data1: 0xBCDE0395,
     Data2: 0xE52F,
