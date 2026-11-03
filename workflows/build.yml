@@ -1,0 +1,21 @@
+name: Build DYLAND
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release
+      - name: Simpan hasil (dyland.exe)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dyland-windows
+          path: target/release/dyland.exe
