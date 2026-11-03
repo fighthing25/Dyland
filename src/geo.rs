@@ -6,8 +6,8 @@ use std::f32::consts::PI;
 pub type Pt = (f32, f32);
 
 // Ukuran area gambar dan bentuk (sama dengan versi Python Fase 1)
-pub const W: f32 = 380.0;
-pub const H: f32 = 300.0;
+pub const W: f32 = 400.0;
+pub const H: f32 = 330.0;
 pub const CX: f32 = W / 2.0;
 pub const MARGIN: f32 = 10.0;
 pub const CAP_W: f32 = 170.0;
