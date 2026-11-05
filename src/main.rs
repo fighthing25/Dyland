@@ -1,22 +1,24 @@
 //! DYLAND - Dynamic Island untuk Windows (Rust)
 //!
-//! Tahap 2: sektor bisa diklik dan membuka panel (Media, Sistem, Pusat data),
-//! wajah Venom di kapsul, serta fitur-fitur sistem. Semua digambar lewat kode.
-//! Tanpa WebView2, tanpa file gambar.
+//! v0.3: radial menampilkan semua ikon fitur (dengan tooltip), klik ikon membuka
+//! panel dengan deretan tab fitur, pengaturan utama, addons, kalender + tugas.
+//! Semua digambar lewat kode. Tanpa WebView2, tanpa file gambar.
 
 #![windows_subsystem = "windows"]
 
 mod cal;
+mod cfg;
 mod geo;
 mod sys;
 mod ui;
 
+use cfg::{Cfg, Todo, N_FEAT};
 use geo::*;
 use std::cell::RefCell;
 use std::mem;
 use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant};
-use tiny_skia::{Color, Pixmap, Transform};
+use tiny_skia::{Color, Path, PathBuilder, Pixmap, Transform};
 use ui::*;
 use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
 use winapi::shared::windef::{HDC, HWND, POINT, SIZE};
@@ -32,59 +34,169 @@ use winapi::um::winuser::*;
 // ---------------------------------------------------------------------------
 // PENGATURAN
 // ---------------------------------------------------------------------------
-const LEAVE_DELAY: f32 = 0.18; // detik sebelum busur menutup
-const PANEL_LEAVE: f32 = 0.5; // detik sebelum panel menutup setelah kursor pergi
+const LEAVE_DELAY: f32 = 0.18;
+const PANEL_LEAVE: f32 = 0.5;
 const VOLUME_STEP: f32 = 4.0;
 const BRIGHT_STEP: f32 = 5.0;
 const HUD_MS: u64 = 1300;
 const PANEL_W: f32 = 340.0;
 const ACCENT: [u8; 3] = [110, 185, 255];
+const X0: f32 = CX - PANEL_W / 2.0;
+const Y0: f32 = MARGIN;
 
-fn page_h(p: Page) -> f32 {
-    match p {
-        Page::Media => 196.0,
-        Page::System => 196.0,
-        Page::Hub => 266.0,
-    }
-}
-
-fn page_title(p: Page) -> &'static str {
-    match p {
-        Page::Media => "Media",
-        Page::System => "Sistem",
-        Page::Hub => "Pusat data",
-    }
-}
+const CITIES: &[&str] = &[
+    "Jakarta", "Bandung", "Surabaya", "Medan", "Semarang", "Makassar", "Palembang", "Tangerang", "Depok",
+    "Bekasi", "Bogor", "Yogyakarta", "Malang", "Denpasar", "Batam", "Pekanbaru", "Padang", "Bandar Lampung",
+    "Banjarmasin", "Pontianak", "Samarinda", "Balikpapan", "Manado", "Jayapura", "Ambon", "Kupang", "Mataram",
+    "Palu", "Kendari", "Jambi", "Bengkulu", "Banda Aceh", "Serang", "Cirebon", "Surakarta", "Pangkal Pinang",
+    "Tanjung Pinang", "Gorontalo", "Ternate", "Sorong", "Palangka Raya", "Tarakan", "Sukabumi", "Tasikmalaya",
+    "Magelang", "Kediri", "Jember", "Purwokerto",
+];
 
 // ---------------------------------------------------------------------------
-// TIPE DATA
+// FITUR
 // ---------------------------------------------------------------------------
 #[derive(Clone, Copy, PartialEq)]
-enum Page {
-    Media,
-    System,
-    Hub,
+enum Feat {
+    Music,
+    Sound,
+    Mic,
+    Shot,
+    Awake,
+    Lock,
+    Power,
+    Calendar,
+    Clip,
+    Prayer,
+    Traffic,
+    Addons,
+    Settings,
 }
 
+const FEATS: [Feat; N_FEAT] = [
+    Feat::Music,
+    Feat::Sound,
+    Feat::Mic,
+    Feat::Shot,
+    Feat::Awake,
+    Feat::Lock,
+    Feat::Power,
+    Feat::Calendar,
+    Feat::Clip,
+    Feat::Prayer,
+    Feat::Traffic,
+    Feat::Addons,
+    Feat::Settings,
+];
+
+impl Feat {
+    fn idx(self) -> usize {
+        self as usize
+    }
+
+    fn base_icon(self) -> Icon {
+        match self {
+            Feat::Music => Icon::Note,
+            Feat::Sound => Icon::Speaker,
+            Feat::Mic => Icon::Mic,
+            Feat::Shot => Icon::Camera,
+            Feat::Awake => Icon::Coffee,
+            Feat::Lock => Icon::Lock,
+            Feat::Power => Icon::Power,
+            Feat::Calendar => Icon::Calendar,
+            Feat::Clip => Icon::Clipboard,
+            Feat::Prayer => Icon::Mosque,
+            Feat::Traffic => Icon::Chart,
+            Feat::Addons => Icon::Puzzle,
+            Feat::Settings => Icon::Gear,
+        }
+    }
+
+    fn tip(self) -> &'static str {
+        match self {
+            Feat::Music => "Pemutar musik: lagu sebelumnya, jeda, berikutnya",
+            Feat::Sound => "Suara: volume, kecerahan, bisukan, output",
+            Feat::Mic => "Bisukan / aktifkan mikrofon",
+            Feat::Shot => "Screenshot layar penuh",
+            Feat::Awake => "Awake: cegah layar dan komputer tidur",
+            Feat::Lock => "Kunci komputer",
+            Feat::Power => "Tidur, restart, matikan",
+            Feat::Calendar => "Kalender, hari libur, dan tugas",
+            Feat::Clip => "Riwayat clipboard",
+            Feat::Prayer => "Jadwal shalat (addon)",
+            Feat::Traffic => "Monitor lalu lintas internet (addon)",
+            Feat::Addons => "Addons: tambah atau sembunyikan fitur",
+            Feat::Settings => "Pengaturan utama",
+        }
+    }
+
+    fn page_h(self) -> f32 {
+        match self {
+            Feat::Music => 160.0,
+            Feat::Sound => 232.0,
+            Feat::Power => 150.0,
+            Feat::Calendar => 350.0,
+            Feat::Clip => 240.0,
+            Feat::Prayer => 250.0,
+            Feat::Traffic => 190.0,
+            Feat::Addons => 210.0,
+            Feat::Settings => 300.0,
+            _ => 160.0,
+        }
+    }
+
+    fn has_panel(self) -> bool {
+        !matches!(self, Feat::Mic | Feat::Shot | Feat::Awake | Feat::Lock)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TOMBOL DI PANEL
+// ---------------------------------------------------------------------------
 #[derive(Clone, Copy, PartialEq)]
 enum Act {
     None,
     Close,
+    Feature(Feat),
     Prev,
     PlayPause,
     Next,
-    MicToggle,
-    Sound,
-    Screenshot,
-    Awake,
-    Lock,
+    SpkMute,
+    OpenSound,
+    SliderVol,
+    SliderBri,
     Sleep,
     Restart,
     Shutdown,
-    Tab(u8),
     CalPrev,
     CalNext,
+    Day(u32),
+    TodoToggle(usize),
+    TodoDel(usize),
+    TodoAdd,
     ClipCopy(usize),
+    ClipClear,
+    CityBtn,
+    City(usize),
+    CityPrev,
+    CityNext,
+    CityBack,
+    AddonToggle(Feat),
+    SetFeat(Feat),
+    SetJawa,
+    SetHijri,
+    SetNotify,
+    SetStartup,
+    Quit,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum WKind {
+    Button,
+    Slider,
+    Toggle,
+    Todo,
+    Plain,
 }
 
 #[derive(Clone)]
@@ -95,10 +207,25 @@ struct Widget {
     icon: Icon,
     on: bool,
     enabled: bool,
+    tab: bool,
+    tip: &'static str,
+    kind: WKind,
+    val: f32,
 }
 
 fn wd(r: (f32, f32, f32, f32), act: Act, label: &str, icon: Icon) -> Widget {
-    Widget { r, act, label: label.to_string(), icon, on: false, enabled: true }
+    Widget {
+        r,
+        act,
+        label: label.to_string(),
+        icon,
+        on: false,
+        enabled: true,
+        tab: false,
+        tip: "",
+        kind: WKind::Button,
+        val: -1.0,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -138,6 +265,30 @@ struct ClipItem {
     otp: bool,
 }
 
+fn fmt_rate(b: f32) -> String {
+    if b < 1024.0 {
+        format!("{:.0} B/s", b)
+    } else if b < 1024.0 * 1024.0 {
+        format!("{:.0} KB/s", b / 1024.0)
+    } else {
+        format!("{:.1} MB/s", b / 1024.0 / 1024.0)
+    }
+}
+
+/// Bentuk mata Venom (mata kiri; ujung runcing di bagian dalam bawah).
+fn eye_path() -> Option<Path> {
+    let mut pb = PathBuilder::new();
+    pb.move_to(6.5, 6.0);
+    pb.cubic_to(1.0, 8.5, -6.5, 5.5, -7.0, -1.0);
+    pb.cubic_to(-7.5, -6.5, -2.0, -9.0, 2.5, -6.5);
+    pb.cubic_to(5.0, -4.5, 6.5, 0.5, 6.5, 6.0);
+    pb.close();
+    pb.finish()
+}
+
+// ---------------------------------------------------------------------------
+// STATUS APLIKASI
+// ---------------------------------------------------------------------------
 struct App {
     hwnd: HWND,
     x0: i32,
@@ -151,37 +302,50 @@ struct App {
     pixmap: Pixmap,
     text: TextEngine,
     epoch: Instant,
+    cfg: Cfg,
 
     t: f32,
     open: bool,
     anim: Option<Anim>,
     leave_at: Option<Instant>,
     body_pts: Vec<Pt>,
-    hl: [f32; 3],
+    hl: [f32; 16],
+    hover_ring: Option<usize>,
+    tip: Option<(String, f32, f32)>,
 
-    view: Option<Page>,
+    view: Option<Feat>,
     panel_open: bool,
     pv: f32,
+    ph_cur: f32,
     panel_anim: Option<Anim>,
     panel_leave: Option<Instant>,
     hover_w: Option<usize>,
     confirm: Option<(Act, Instant)>,
+    drag: Option<Act>,
 
-    hub_tab: u8,
     cal_year: i32,
     cal_month: u32,
+    cal_sel: (i32, u32, u32),
+    todos: Vec<Todo>,
+    input: Option<String>,
+    caret_phase: bool,
+    city_page: Option<usize>,
+    startup: bool,
 
     hud: Option<(Kind, Option<i32>, Instant)>,
     toast: Option<(String, Instant)>,
     bright: sys::Brightness,
+    traffic: sys::Traffic,
+    shot_result: sys::ShotResult,
+    vol_pct: Option<i32>,
+    bri_pct: Option<i32>,
     awake: bool,
     mic_muted: Option<bool>,
+    spk_muted: Option<bool>,
     caps: bool,
     clips: Vec<ClipItem>,
 
     prayer: sys::PrayerShared,
-    city: String,
-    country: String,
     prayer_try: Option<Instant>,
     notified: String,
     last_sec: u32,
@@ -202,37 +366,6 @@ struct App {
     dirty: bool,
 }
 
-fn load_config() -> (String, String) {
-    let mut city = String::from("Jakarta");
-    let mut country = String::from("Indonesia");
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        let dir = format!("{}\\Dyland", appdata);
-        let path = format!("{}\\config.txt", dir);
-        match std::fs::read_to_string(&path) {
-            Ok(content) => {
-                for line in content.lines() {
-                    if let Some((k, v)) = line.split_once('=') {
-                        let v = v.trim();
-                        if v.is_empty() {
-                            continue;
-                        }
-                        match k.trim() {
-                            "kota" => city = v.to_string(),
-                            "negara" => country = v.to_string(),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            Err(_) => {
-                let _ = std::fs::create_dir_all(&dir);
-                let _ = std::fs::write(&path, "kota=Jakarta\r\nnegara=Indonesia\r\n");
-            }
-        }
-    }
-    (city, country)
-}
-
 impl App {
     unsafe fn new(hwnd: HWND, x0: i32, y0: i32, wpx: i32, hpx: i32, scale: f32) -> App {
         let screen_dc = GetDC(null_mut());
@@ -249,7 +382,6 @@ impl App {
         SelectObject(mem_dc, bmp as *mut _);
 
         let lt = sys::now_local();
-        let (city, country) = load_config();
         let now = Instant::now();
         App {
             hwnd,
@@ -264,32 +396,45 @@ impl App {
             pixmap: Pixmap::new(wpx as u32, hpx as u32).unwrap(),
             text: TextEngine::new(),
             epoch: now,
+            cfg: Cfg::load(),
             t: 0.0,
             open: false,
             anim: None,
             leave_at: None,
             body_pts: body_points(0.0),
-            hl: [0.0; 3],
+            hl: [0.0; 16],
+            hover_ring: None,
+            tip: None,
             view: None,
             panel_open: false,
             pv: 0.0,
+            ph_cur: 160.0,
             panel_anim: None,
             panel_leave: None,
             hover_w: None,
             confirm: None,
-            hub_tab: 0,
+            drag: None,
             cal_year: lt.year,
             cal_month: lt.month,
+            cal_sel: (lt.year, lt.month, lt.day),
+            todos: cfg::load_todos(),
+            input: None,
+            caret_phase: false,
+            city_page: None,
+            startup: sys::startup_enabled(),
             hud: None,
             toast: None,
             bright: sys::Brightness::new(),
+            traffic: sys::Traffic::new(),
+            shot_result: sys::new_shot_result(),
+            vol_pct: None,
+            bri_pct: None,
             awake: false,
-            mic_muted: None,
+            mic_muted: sys::mic_muted(),
+            spk_muted: sys::spk_muted(),
             caps: sys::caps_on(),
             clips: Vec::new(),
             prayer: sys::new_prayer(),
-            city,
-            country,
             prayer_try: None,
             notified: String::new(),
             last_sec: 99,
@@ -375,14 +520,60 @@ impl App {
         String::new()
     }
 
+    // --- fitur di radial ------------------------------------------------------
+    fn ring_items(&self) -> Vec<Feat> {
+        FEATS.iter().copied().filter(|f| self.cfg.on[f.idx()]).collect()
+    }
+
+    fn feat_icon(&self, f: Feat) -> Icon {
+        match f {
+            Feat::Mic => {
+                if self.mic_muted == Some(true) {
+                    Icon::MicOff
+                } else {
+                    Icon::Mic
+                }
+            }
+            Feat::Sound => {
+                if self.spk_muted == Some(true) {
+                    Icon::SpeakerOff
+                } else {
+                    Icon::Speaker
+                }
+            }
+            _ => f.base_icon(),
+        }
+    }
+
+    fn feat_active(&self, f: Feat) -> bool {
+        match f {
+            Feat::Mic => self.mic_muted == Some(true),
+            Feat::Sound => self.spk_muted == Some(true),
+            Feat::Awake => self.awake,
+            _ => false,
+        }
+    }
+
+    fn ring_pos(&self, i: usize, n: usize) -> (f32, f32) {
+        let (x, y, _, _) = centerline(ring_s(i, n), 1.0);
+        (x, y)
+    }
+
+    fn ring_hit(&self, mx: f32, my: f32) -> Option<usize> {
+        let n = self.ring_items().len();
+        for i in 0..n {
+            let (x, y) = self.ring_pos(i, n);
+            if (mx - x) * (mx - x) + (my - y) * (my - y) <= 12.5 * 12.5 {
+                return Some(i);
+            }
+        }
+        None
+    }
+
     // --- bentuk panel ---------------------------------------------------------
     fn panel_rect(&self) -> (f32, f32, f32, f32) {
-        let ph = match self.view {
-            Some(p) => page_h(p),
-            None => 196.0,
-        };
         let w = CAP_W + (PANEL_W - CAP_W) * self.pv;
-        let h = CAP_H + (ph - CAP_H) * self.pv;
+        let h = CAP_H + (self.ph_cur - CAP_H) * self.pv;
         (CX - w / 2.0, MARGIN, w, h)
     }
 
@@ -417,29 +608,42 @@ impl App {
         });
     }
 
-    fn open_page(&mut self, p: Page) {
-        self.view = Some(p);
+    fn open_page(&mut self, f: Feat) {
+        self.cancel_input();
+        self.city_page = None;
+        self.hover_w = None;
+        self.confirm = None;
+        let was_open = self.panel_open;
+        self.view = Some(f);
         self.panel_open = true;
         self.panel_leave = None;
-        self.hover_w = None;
-        self.set_open(false);
-        self.panel_anim = Some(Anim {
-            from: self.pv,
-            to: 1.0,
-            start: Instant::now(),
-            dur: 0.75,
-            elastic: true,
-        });
-        match p {
-            Page::Media => {
-                self.mic_muted = sys::mic_muted();
+        if !was_open {
+            self.ph_cur = f.page_h();
+            self.set_open(false);
+            self.panel_anim = Some(Anim {
+                from: self.pv,
+                to: 1.0,
+                start: Instant::now(),
+                dur: 0.75,
+                elastic: true,
+            });
+        }
+        match f {
+            Feat::Sound => {
+                self.vol_pct = sys::get_volume();
+                self.spk_muted = sys::spk_muted();
+                self.bri_pct = self.bright.current();
             }
-            Page::Hub => {
+            Feat::Calendar => {
                 let lt = sys::now_local();
                 self.cal_year = lt.year;
                 self.cal_month = lt.month;
+                self.cal_sel = (lt.year, lt.month, lt.day);
             }
-            Page::System => {}
+            Feat::Settings => {
+                self.startup = sys::startup_enabled();
+            }
+            _ => {}
         }
         self.dirty = true;
     }
@@ -448,6 +652,7 @@ impl App {
         if !self.panel_open {
             return;
         }
+        self.cancel_input();
         self.panel_open = false;
         self.panel_anim = Some(Anim {
             from: self.pv,
@@ -479,90 +684,248 @@ impl App {
                     self.view = None;
                     self.hover_w = None;
                     self.confirm = None;
+                    self.drag = None;
                 }
             }
             self.dirty = true;
         }
     }
 
+    fn smooth_height(&mut self) -> bool {
+        if let Some(f) = self.view {
+            let target = f.page_h();
+            let d = target - self.ph_cur;
+            if d.abs() > 0.5 {
+                self.ph_cur += d * 0.35;
+                self.dirty = true;
+                return true;
+            } else if d != 0.0 {
+                self.ph_cur = target;
+                self.dirty = true;
+            }
+        }
+        false
+    }
+
     // --- daftar tombol di panel ---------------------------------------------------
+    fn todo_rows(&self) -> Vec<usize> {
+        let (y, m, d) = self.cal_sel;
+        let key = (y as u32) * 10000 + m * 100 + d;
+        let mut v = Vec::new();
+        for (i, t) in self.todos.iter().enumerate() {
+            if t.date == key {
+                v.push(i);
+                if v.len() >= 3 {
+                    break;
+                }
+            }
+        }
+        v
+    }
+
     fn widgets(&self) -> Vec<Widget> {
         let mut v: Vec<Widget> = Vec::new();
         let page = match self.view {
             Some(p) => p,
             None => return v,
         };
-        let x0 = CX - PANEL_W / 2.0;
-        let y0 = MARGIN;
-        v.push(wd((x0 + PANEL_W - 38.0, y0 + 8.0, 28.0, 26.0), Act::Close, "", Icon::Close));
+
+        // deretan tab fitur di bagian atas panel
+        let items = self.ring_items();
+        let n = items.len();
+        let area_w = 262.0f32;
+        let sp = (area_w / (n as f32)).min(24.0);
+        let start = CX - 152.0 + (area_w - sp * (n as f32)) / 2.0 + sp / 2.0;
+        for (i, f) in items.iter().enumerate() {
+            let cx = start + sp * (i as f32);
+            let mut w = wd((cx - sp / 2.0, Y0 + 8.0, sp, 26.0), Act::Feature(*f), "", self.feat_icon(*f));
+            w.tab = true;
+            w.tip = f.tip();
+            w.on = self.feat_active(*f) || page == *f;
+            v.push(w);
+        }
+        let mut close = wd((X0 + PANEL_W - 36.0, Y0 + 8.0, 28.0, 26.0), Act::Close, "", Icon::Close);
+        close.tab = true;
+        close.tip = "Tutup panel";
+        v.push(close);
+
         match page {
-            Page::Media => {
+            Feat::Music => {
                 let bw = 64.0;
                 let gap = 12.0;
                 let sx = CX - (3.0 * bw + 2.0 * gap) / 2.0;
-                let y = y0 + 46.0;
+                let y = Y0 + 52.0;
                 v.push(wd((sx, y, bw, 54.0), Act::Prev, "", Icon::Prev));
                 v.push(wd((sx + bw + gap, y, bw, 54.0), Act::PlayPause, "", Icon::PlayPause));
                 v.push(wd((sx + 2.0 * (bw + gap), y, bw, 54.0), Act::Next, "", Icon::Next));
-                let y2 = y + 54.0 + 12.0;
-                let w2 = 152.0;
-                let muted = self.mic_muted == Some(true);
-                let mut m = wd(
-                    (CX - w2 - 6.0, y2, w2, 52.0),
-                    Act::MicToggle,
-                    if muted { "Mic: bisu" } else { "Mic: aktif" },
-                    if muted { Icon::MicOff } else { Icon::Mic },
-                );
-                m.on = muted;
-                v.push(m);
-                v.push(wd((CX + 6.0, y2, w2, 52.0), Act::Sound, "Output suara", Icon::Speaker));
             }
-            Page::System => {
-                let bw = 74.0;
-                let gap = 8.0;
-                let sx = CX - (4.0 * bw + 3.0 * gap) / 2.0;
-                let y = y0 + 48.0;
-                v.push(wd((sx, y, bw, 62.0), Act::Screenshot, "Screenshot", Icon::Camera));
-                let mut a = wd((sx + (bw + gap), y, bw, 62.0), Act::Awake, "Awake", Icon::Coffee);
-                a.on = self.awake;
-                v.push(a);
-                let mut c = wd(
-                    (sx + 2.0 * (bw + gap), y, bw, 62.0),
-                    Act::None,
-                    if self.caps { "Caps: ON" } else { "Caps: OFF" },
-                    Icon::None,
+            Feat::Sound => {
+                let muted = self.spk_muted == Some(true);
+                let mut b = wd(
+                    (X0 + 14.0, Y0 + 50.0, 312.0, 38.0),
+                    Act::SpkMute,
+                    if muted { "Suara dibisukan (klik untuk aktifkan)" } else { "Bisukan suara" },
+                    if muted { Icon::SpeakerOff } else { Icon::Speaker },
                 );
-                c.on = self.caps;
-                c.enabled = false;
-                v.push(c);
-                v.push(wd((sx + 3.0 * (bw + gap), y, bw, 62.0), Act::Lock, "Kunci", Icon::Lock));
-                let bw2 = 104.0;
-                let sx2 = CX - (3.0 * bw2 + 2.0 * gap) / 2.0;
-                let y2 = y + 62.0 + 8.0;
-                v.push(wd((sx2, y2, bw2, 62.0), Act::Sleep, "Tidur", Icon::Moon));
-                v.push(wd((sx2 + (bw2 + gap), y2, bw2, 62.0), Act::Restart, "Restart", Icon::Restart));
-                v.push(wd((sx2 + 2.0 * (bw2 + gap), y2, bw2, 62.0), Act::Shutdown, "Matikan", Icon::Power));
+                b.on = muted;
+                v.push(b);
+                let mut s1 = wd((X0 + 14.0, Y0 + 98.0, 312.0, 36.0), Act::SliderVol, "Volume", Icon::None);
+                s1.kind = WKind::Slider;
+                s1.val = match self.vol_pct {
+                    Some(p) => (p as f32) / 100.0,
+                    None => -1.0,
+                };
+                v.push(s1);
+                let mut s2 = wd((X0 + 14.0, Y0 + 142.0, 312.0, 36.0), Act::SliderBri, "Kecerahan", Icon::None);
+                s2.kind = WKind::Slider;
+                s2.val = match self.bri_pct {
+                    Some(p) => (p as f32) / 100.0,
+                    None => -1.0,
+                };
+                v.push(s2);
+                v.push(wd((X0 + 14.0, Y0 + 188.0, 312.0, 30.0), Act::OpenSound, "Pengaturan output suara", Icon::None));
             }
-            Page::Hub => {
-                let tw = 100.0;
+            Feat::Power => {
+                let bw = 100.0;
                 let gap = 8.0;
-                let sx = CX - (3.0 * tw + 2.0 * gap) / 2.0;
-                let names = ["Shalat", "Kalender", "Clipboard"];
-                for i in 0..3 {
-                    let mut w = wd((sx + (i as f32) * (tw + gap), y0 + 44.0, tw, 26.0), Act::Tab(i as u8), names[i], Icon::None);
-                    w.on = self.hub_tab == i as u8;
+                let sx = CX - (3.0 * bw + 2.0 * gap) / 2.0;
+                let y = Y0 + 52.0;
+                v.push(wd((sx, y, bw, 66.0), Act::Sleep, "Tidur", Icon::Moon));
+                v.push(wd((sx + bw + gap, y, bw, 66.0), Act::Restart, "Restart", Icon::Restart));
+                v.push(wd((sx + 2.0 * (bw + gap), y, bw, 66.0), Act::Shutdown, "Matikan", Icon::Power));
+            }
+            Feat::Calendar => {
+                v.push(wd((CX - 158.0, Y0 + 44.0, 30.0, 24.0), Act::CalPrev, "", Icon::Left));
+                v.push(wd((CX + 128.0, Y0 + 44.0, 30.0, 24.0), Act::CalNext, "", Icon::Right));
+                let first = cal::weekday(cal::days_from_civil(self.cal_year, self.cal_month, 1));
+                let first_idx = (first + 6) % 7;
+                let dim = cal::days_in_month(self.cal_year, self.cal_month);
+                for d in 1..=dim {
+                    let idx = first_idx + (d as usize) - 1;
+                    let row = idx / 7;
+                    let col = idx % 7;
+                    let cx = CX - 132.0 + (col as f32) * 44.0;
+                    let by = Y0 + 96.0 + (row as f32) * 16.0;
+                    let mut w = wd((cx - 20.0, by - 12.0, 40.0, 16.0), Act::Day(d), "", Icon::None);
+                    w.kind = WKind::Plain;
                     v.push(w);
                 }
-                if self.hub_tab == 1 {
-                    v.push(wd((CX - 158.0, y0 + 78.0, 30.0, 24.0), Act::CalPrev, "", Icon::Left));
-                    v.push(wd((CX + 128.0, y0 + 78.0, 30.0, 24.0), Act::CalNext, "", Icon::Right));
-                } else if self.hub_tab == 2 {
-                    let n = self.clips.len().min(5);
-                    for i in 0..n {
-                        v.push(wd((CX - 158.0, y0 + 82.0 + (i as f32) * 30.0, 316.0, 26.0), Act::ClipCopy(i), "", Icon::None));
-                    }
+                let rows = self.todo_rows();
+                let mut y = Y0 + 252.0;
+                for &i in rows.iter() {
+                    let mut w = wd((X0 + 14.0, y, 276.0, 22.0), Act::TodoToggle(i), &self.todos[i].text, Icon::None);
+                    w.kind = WKind::Todo;
+                    w.on = self.todos[i].done;
+                    v.push(w);
+                    let mut x = wd((X0 + 294.0, y, 32.0, 22.0), Act::TodoDel(i), "", Icon::Close);
+                    x.tab = true;
+                    x.tip = "Hapus tugas";
+                    v.push(x);
+                    y += 23.0;
+                }
+                if self.input.is_none() {
+                    v.push(wd((X0 + 14.0, y, 312.0, 22.0), Act::TodoAdd, "+ Tambah tugas", Icon::None));
                 }
             }
+            Feat::Clip => {
+                let n = self.clips.len().min(5);
+                for i in 0..n {
+                    let mut w = wd((X0 + 14.0, Y0 + 46.0 + (i as f32) * 31.0, 312.0, 27.0), Act::ClipCopy(i), "", Icon::None);
+                    w.tip = "";
+                    v.push(w);
+                }
+                v.push(wd((X0 + 14.0, Y0 + 204.0, 312.0, 26.0), Act::ClipClear, "Hapus riwayat", Icon::None));
+            }
+            Feat::Prayer => {
+                if let Some(p) = self.city_page {
+                    let from = p * 10;
+                    for k in 0..10 {
+                        let idx = from + k;
+                        if idx >= CITIES.len() {
+                            break;
+                        }
+                        let c = (k % 2) as f32;
+                        let r = (k / 2) as f32;
+                        let mut w = wd(
+                            (CX - 158.0 + c * 162.0, Y0 + 46.0 + r * 30.0, 154.0, 26.0),
+                            Act::City(idx),
+                            CITIES[idx],
+                            Icon::None,
+                        );
+                        w.on = CITIES[idx] == self.cfg.city.as_str();
+                        v.push(w);
+                    }
+                    v.push(wd((CX - 158.0, Y0 + 206.0, 90.0, 26.0), Act::CityBack, "Kembali", Icon::None));
+                    v.push(wd((CX + 60.0, Y0 + 206.0, 30.0, 26.0), Act::CityPrev, "", Icon::Left));
+                    v.push(wd((CX + 128.0, Y0 + 206.0, 30.0, 26.0), Act::CityNext, "", Icon::Right));
+                } else {
+                    let label = format!("Kota: {}", self.cfg.city);
+                    v.push(wd((CX + 8.0, Y0 + 44.0, 150.0, 24.0), Act::CityBtn, &label, Icon::None));
+                }
+            }
+            Feat::Traffic => {}
+            Feat::Addons => {
+                let rows: [(Feat, &str); 3] = [
+                    (Feat::Prayer, "Jadwal shalat\nJadwal Kemenag RI, pengingat, pilih kota"),
+                    (Feat::Traffic, "Monitor lalu lintas\nKecepatan unduh dan unggah internet"),
+                    (Feat::Settings, "Teleprompter\nSegera hadir"),
+                ];
+                for (i, (f, label)) in rows.iter().enumerate() {
+                    let mut w = wd((X0 + 14.0, Y0 + 48.0 + (i as f32) * 50.0, 312.0, 44.0), Act::AddonToggle(*f), label, Icon::None);
+                    w.kind = WKind::Toggle;
+                    if i < 2 {
+                        w.on = self.cfg.on[f.idx()];
+                    } else {
+                        w.enabled = false;
+                    }
+                    v.push(w);
+                }
+            }
+            Feat::Settings => {
+                let feats: [(Feat, &str); 9] = [
+                    (Feat::Music, "Musik"),
+                    (Feat::Sound, "Suara"),
+                    (Feat::Mic, "Mikrofon"),
+                    (Feat::Shot, "Screenshot"),
+                    (Feat::Awake, "Awake"),
+                    (Feat::Lock, "Kunci"),
+                    (Feat::Power, "Daya"),
+                    (Feat::Calendar, "Kalender"),
+                    (Feat::Clip, "Clipboard"),
+                ];
+                for (i, (f, name)) in feats.iter().enumerate() {
+                    let c = (i % 3) as f32;
+                    let r = (i / 3) as f32;
+                    let mut w = wd(
+                        (CX - 158.0 + c * 108.0, Y0 + 62.0 + r * 32.0, 100.0, 26.0),
+                        Act::SetFeat(*f),
+                        name,
+                        Icon::None,
+                    );
+                    w.on = self.cfg.on[f.idx()];
+                    v.push(w);
+                }
+                let opts: [(Act, &str, bool); 4] = [
+                    (Act::SetJawa, "Tanggal Jawa", self.cfg.show_jawa),
+                    (Act::SetHijri, "Tanggal Hijriah", self.cfg.show_hijri),
+                    (Act::SetNotify, "Notifikasi shalat", self.cfg.notify),
+                    (Act::SetStartup, "Mulai bersama Windows", self.startup),
+                ];
+                for (i, (act, name, on)) in opts.iter().enumerate() {
+                    let c = (i % 2) as f32;
+                    let r = (i / 2) as f32;
+                    let mut w = wd(
+                        (CX - 158.0 + c * 162.0, Y0 + 182.0 + r * 32.0, 154.0, 26.0),
+                        *act,
+                        name,
+                        Icon::None,
+                    );
+                    w.on = *on;
+                    v.push(w);
+                }
+                v.push(wd((CX - 158.0, Y0 + 254.0, 316.0, 30.0), Act::Quit, "Keluar dari DYLAND", Icon::None));
+            }
+            _ => {}
         }
         v
     }
@@ -584,21 +947,60 @@ impl App {
         if self.view.is_some() {
             if self.panel_open && self.pv > 0.85 {
                 if let Some(i) = self.widget_at(mx, my) {
-                    let act = self.widgets()[i].act;
-                    self.perform(act);
+                    let w = self.widgets()[i].clone();
+                    if w.kind == WKind::Slider {
+                        self.drag = Some(w.act);
+                        self.apply_slider(w.act, w.r, mx);
+                        self.dirty = true;
+                    } else {
+                        self.perform(w.act);
+                    }
                 }
             }
             return;
         }
         if self.open && self.t > 0.85 {
-            let s = sector_at(mx, my);
-            if s == 0 {
-                self.open_page(Page::Media);
-            } else if s == 1 {
-                self.open_page(Page::System);
-            } else if s == 2 {
-                self.open_page(Page::Hub);
+            if let Some(i) = self.ring_hit(mx, my) {
+                let items = self.ring_items();
+                if i < items.len() {
+                    self.activate(items[i]);
+                }
             }
+        }
+    }
+
+    fn apply_slider(&mut self, act: Act, r: (f32, f32, f32, f32), mx: f32) {
+        let frac = ((mx - r.0) / r.2).clamp(0.0, 1.0);
+        match act {
+            Act::SliderVol => {
+                self.vol_pct = sys::set_volume(frac * 100.0);
+                if self.vol_pct.is_some() {
+                    self.spk_muted = Some(false);
+                }
+            }
+            Act::SliderBri => {
+                self.bri_pct = self.bright.set_level(frac * 100.0);
+            }
+            _ => {}
+        }
+    }
+
+    fn update_drag(&mut self, mx: f32) {
+        let act = match self.drag {
+            Some(a) => a,
+            None => return,
+        };
+        if sys::left_button_down() {
+            let ws = self.widgets();
+            for w in ws.iter() {
+                if w.act == act {
+                    self.apply_slider(act, w.r, mx);
+                    break;
+                }
+            }
+            self.dirty = true;
+        } else {
+            self.drag = None;
         }
     }
 
@@ -616,30 +1018,18 @@ impl App {
         self.dirty = true;
     }
 
-    fn perform(&mut self, act: Act) {
-        match act {
-            Act::None => {}
-            Act::Close => self.close_panel(),
-            Act::Prev => sys::media_key(0xB1),
-            Act::PlayPause => sys::media_key(0xB3),
-            Act::Next => sys::media_key(0xB0),
-            Act::MicToggle => {
+    fn activate(&mut self, f: Feat) {
+        match f {
+            Feat::Mic => {
                 self.mic_muted = sys::mic_toggle();
                 match self.mic_muted {
                     Some(true) => self.say("Mikrofon dibisukan", 2.0),
                     Some(false) => self.say("Mikrofon aktif", 2.0),
-                    None => self.say("Mikrofon tidak ditemukan", 2.5),
+                    None => self.say("Mikrofon tidak ditemukan (lihat log.txt)", 3.0),
                 }
             }
-            Act::Sound => sys::open_sound_settings(),
-            Act::Screenshot => {
-                let r = sys::screenshot(self.hwnd);
-                match r {
-                    Some(_) => self.say("Tersimpan di Gambar\\Dyland", 3.0),
-                    None => self.say("Screenshot gagal", 3.0),
-                }
-            }
-            Act::Awake => {
+            Feat::Shot => self.do_screenshot(),
+            Feat::Awake => {
                 self.awake = !self.awake;
                 sys::set_awake(self.awake);
                 if self.awake {
@@ -648,14 +1038,63 @@ impl App {
                     self.say("Awake dimatikan", 2.0);
                 }
             }
-            Act::Lock => sys::lock_pc(),
+            Feat::Lock => sys::lock_pc(),
+            _ => {
+                if f.has_panel() {
+                    self.open_page(f);
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
+    fn do_screenshot(&mut self) {
+        match sys::capture_screen(self.hwnd) {
+            Some(shot) => {
+                sys::save_shot_async(shot, self.shot_result.clone());
+                self.say("Menyimpan screenshot…", 1.5);
+            }
+            None => self.say("Screenshot gagal (lihat log.txt)", 3.5),
+        }
+        self.dirty = true;
+        self.refresh();
+    }
+
+    fn poll_shot(&mut self) {
+        let res = match self.shot_result.lock() {
+            Ok(mut g) => g.take(),
+            Err(_) => None,
+        };
+        if let Some(r) = res {
+            match r {
+                Ok(_) => self.say("Screenshot tersimpan di Gambar\\Dyland", 3.5),
+                Err(e) => {
+                    let msg = format!("Screenshot gagal: {}", e);
+                    self.say(&msg, 4.0);
+                }
+            }
+        }
+    }
+
+    fn perform(&mut self, act: Act) {
+        match act {
+            Act::None => {}
+            Act::Close => self.close_panel(),
+            Act::Feature(f) => self.activate(f),
+            Act::Prev => sys::media_key(0xB1),
+            Act::PlayPause => sys::media_key(0xB3),
+            Act::Next => sys::media_key(0xB0),
+            Act::SpkMute => {
+                self.spk_muted = sys::spk_toggle_mute();
+                if self.spk_muted.is_none() {
+                    self.say("Perangkat suara tidak ditemukan (lihat log.txt)", 3.0);
+                }
+            }
+            Act::OpenSound => sys::open_sound_settings(),
+            Act::SliderVol | Act::SliderBri => {}
             Act::Sleep => self.confirm_or(Act::Sleep, sys::sleep_pc),
             Act::Restart => self.confirm_or(Act::Restart, sys::restart_pc),
             Act::Shutdown => self.confirm_or(Act::Shutdown, sys::shutdown_pc),
-            Act::Tab(i) => {
-                self.hub_tab = i;
-                self.hover_w = None;
-            }
             Act::CalPrev => {
                 if self.cal_month == 1 {
                     self.cal_month = 12;
@@ -672,12 +1111,169 @@ impl App {
                     self.cal_month += 1;
                 }
             }
+            Act::Day(d) => {
+                self.cal_sel = (self.cal_year, self.cal_month, d);
+                self.cancel_input();
+            }
+            Act::TodoToggle(i) => {
+                if let Some(t) = self.todos.get_mut(i) {
+                    t.done = !t.done;
+                }
+                cfg::save_todos(&self.todos);
+            }
+            Act::TodoDel(i) => {
+                if i < self.todos.len() {
+                    self.todos.remove(i);
+                    cfg::save_todos(&self.todos);
+                }
+            }
+            Act::TodoAdd => self.begin_input(),
             Act::ClipCopy(i) => {
                 let t = self.clips.get(i).map(|c| c.text.clone());
                 if let Some(t) = t {
                     sys::clipboard_set(&t);
                     self.say("Disalin", 1.5);
                 }
+            }
+            Act::ClipClear => {
+                self.clips.clear();
+            }
+            Act::CityBtn => {
+                let p = CITIES.iter().position(|c| *c == self.cfg.city.as_str()).unwrap_or(0) / 10;
+                self.city_page = Some(p);
+            }
+            Act::City(idx) => {
+                if let Some(c) = CITIES.get(idx) {
+                    self.cfg.city = c.to_string();
+                    self.cfg.country = String::from("Indonesia");
+                    self.cfg.save();
+                    sys::reset_prayer(&self.prayer);
+                    self.prayer_try = None;
+                    self.city_page = None;
+                    let msg = format!("Kota: {}", c);
+                    self.say(&msg, 2.0);
+                }
+            }
+            Act::CityPrev => {
+                if let Some(p) = self.city_page {
+                    let max = (CITIES.len() - 1) / 10;
+                    self.city_page = Some(if p == 0 { max } else { p - 1 });
+                }
+            }
+            Act::CityNext => {
+                if let Some(p) = self.city_page {
+                    let max = (CITIES.len() - 1) / 10;
+                    self.city_page = Some(if p >= max { 0 } else { p + 1 });
+                }
+            }
+            Act::CityBack => {
+                self.city_page = None;
+            }
+            Act::AddonToggle(f) => {
+                self.cfg.on[f.idx()] = !self.cfg.on[f.idx()];
+                self.cfg.save();
+                if f == Feat::Prayer {
+                    self.prayer_try = None;
+                }
+            }
+            Act::SetFeat(f) => {
+                self.cfg.on[f.idx()] = !self.cfg.on[f.idx()];
+                self.cfg.save();
+            }
+            Act::SetJawa => {
+                self.cfg.show_jawa = !self.cfg.show_jawa;
+                self.cfg.save();
+            }
+            Act::SetHijri => {
+                self.cfg.show_hijri = !self.cfg.show_hijri;
+                self.cfg.save();
+            }
+            Act::SetNotify => {
+                self.cfg.notify = !self.cfg.notify;
+                self.cfg.save();
+            }
+            Act::SetStartup => {
+                let want = !self.startup;
+                if sys::set_startup(want) {
+                    self.startup = want;
+                } else {
+                    self.say("Gagal mengubah pengaturan startup", 3.0);
+                }
+            }
+            Act::Quit => unsafe {
+                PostQuitMessage(0);
+            },
+        }
+        self.dirty = true;
+    }
+
+    // --- mengetik (tugas) ---------------------------------------------------------------
+    fn begin_input(&mut self) {
+        self.input = Some(String::new());
+        sys::set_noactivate(self.hwnd, false);
+        sys::take_focus(self.hwnd);
+        self.dirty = true;
+    }
+
+    fn cancel_input(&mut self) {
+        if self.input.is_some() {
+            self.input = None;
+            sys::set_noactivate(self.hwnd, true);
+            self.dirty = true;
+        }
+    }
+
+    fn commit_input(&mut self) {
+        let text = self.input.take().unwrap_or_default();
+        let t = text.trim().to_string();
+        if !t.is_empty() {
+            let (y, m, d) = self.cal_sel;
+            let key = (y as u32) * 10000 + m * 100 + d;
+            self.todos.push(Todo { date: key, done: false, text: t });
+            cfg::save_todos(&self.todos);
+        }
+        sys::set_noactivate(self.hwnd, true);
+        self.dirty = true;
+    }
+
+    fn on_char(&mut self, c: u32) {
+        let mut buf = match self.input.take() {
+            Some(b) => b,
+            None => return,
+        };
+        match c {
+            8 => {
+                buf.pop();
+                self.input = Some(buf);
+            }
+            13 => {
+                self.input = Some(buf);
+                self.commit_input();
+            }
+            27 => {
+                self.input = Some(buf);
+                self.cancel_input();
+            }
+            22 => {
+                if let Some(t) = sys::clipboard_get(self.hwnd) {
+                    let one = t.lines().next().unwrap_or("").trim().to_string();
+                    for ch in one.chars() {
+                        if buf.chars().count() < 80 {
+                            buf.push(ch);
+                        }
+                    }
+                }
+                self.input = Some(buf);
+            }
+            _ => {
+                if c >= 32 {
+                    if let Some(ch) = char::from_u32(c) {
+                        if buf.chars().count() < 80 {
+                            buf.push(ch);
+                        }
+                    }
+                }
+                self.input = Some(buf);
             }
         }
         self.dirty = true;
@@ -700,14 +1296,25 @@ impl App {
         self.dirty = true;
     }
 
-    /// Scroll: sisi kanan = volume, sisi kiri = kecerahan.
+    /// Scroll di pulau: sisi kanan = volume, sisi kiri = kecerahan.
     fn on_wheel(&mut self, delta: i16) {
+        if self.view.is_some() {
+            return;
+        }
         let (mx, _) = self.cursor_local();
         let steps = delta as f32 / 120.0;
         let (kind, val) = if mx >= CX {
-            (Kind::Volume, sys::change_volume(steps * VOLUME_STEP))
+            let v = sys::change_volume(steps * VOLUME_STEP);
+            if v.is_some() {
+                self.vol_pct = v;
+            }
+            (Kind::Volume, v)
         } else {
-            (Kind::Brightness, self.bright.change(steps * BRIGHT_STEP))
+            let b = self.bright.change(steps * BRIGHT_STEP);
+            if b.is_some() {
+                self.bri_pct = b;
+            }
+            (Kind::Brightness, b)
         };
         self.hud = Some((kind, val, Instant::now() + Duration::from_millis(HUD_MS)));
         self.dirty = true;
@@ -818,6 +1425,13 @@ impl App {
             self.confirm = None;
             self.dirty = true;
         }
+        if self.input.is_some() {
+            let ph = (self.epoch.elapsed().as_millis() / 500) % 2 == 0;
+            if ph != self.caret_phase {
+                self.caret_phase = ph;
+                self.dirty = true;
+            }
+        }
     }
 
     fn per_second(&mut self, now: Instant) {
@@ -826,7 +1440,18 @@ impl App {
             return;
         }
         self.last_sec = lt.sec;
-        if self.view == Some(Page::Hub) && self.hub_tab == 0 {
+
+        if self.cfg.on[Feat::Traffic.idx()] {
+            self.traffic.sample();
+            if self.view == Some(Feat::Traffic) {
+                self.dirty = true;
+            }
+        }
+
+        if !self.cfg.on[Feat::Prayer.idx()] {
+            return;
+        }
+        if self.view == Some(Feat::Prayer) {
             self.dirty = true;
         }
 
@@ -841,9 +1466,17 @@ impl App {
         };
         if need && can {
             self.prayer_try = Some(now);
-            sys::fetch_prayer(self.prayer.clone(), self.city.clone(), self.country.clone(), daykey);
+            sys::fetch_prayer(
+                self.prayer.clone(),
+                self.cfg.city.clone(),
+                self.cfg.country.clone(),
+                daykey,
+            );
         }
 
+        if !self.cfg.notify {
+            return;
+        }
         let times: Vec<(String, u32)> = match self.prayer.lock() {
             Ok(g) => {
                 if g.status == 1 {
@@ -885,11 +1518,15 @@ impl App {
         self.update_sys(now);
         self.update_face(now);
         self.per_second(now);
+        self.poll_shot();
+        self.update_drag(mx);
+        let height_moving = self.smooth_height();
 
+        let mut hover_ring: Option<usize> = None;
         if self.view.is_some() {
             let (px, py, pw, ph) = self.panel_rect();
             let inside = mx >= px - 14.0 && mx <= px + pw + 14.0 && my >= py - 14.0 && my <= py + ph + 14.0;
-            if self.panel_open {
+            if self.panel_open && self.input.is_none() && self.drag.is_none() {
                 if inside {
                     self.panel_leave = None;
                 } else {
@@ -932,12 +1569,15 @@ impl App {
                     }
                 }
             }
+            if self.open && self.t > 0.85 {
+                hover_ring = self.ring_hit(mx, my);
+            }
         }
+        self.hover_ring = hover_ring;
 
-        let sec = if self.view.is_none() && self.open && self.t > 0.85 { sector_at(mx, my) } else { -1 };
         let mut moving = false;
-        for i in 0..3 {
-            let target = if sec == i as i32 { 1.0 } else { 0.0 };
+        for i in 0..16 {
+            let target = if hover_ring == Some(i) { 1.0 } else { 0.0 };
             let mut nv = self.hl[i] + (target - self.hl[i]) * 0.35;
             if (nv - target).abs() < 0.01 {
                 nv = target;
@@ -949,6 +1589,35 @@ impl App {
             if nv != target {
                 moving = true;
             }
+        }
+
+        // tooltip
+        let new_tip: Option<(String, f32, f32)> = if self.view.is_some() {
+            match self.hover_w {
+                Some(i) => {
+                    let ws = self.widgets();
+                    match ws.get(i) {
+                        Some(w) if !w.tip.is_empty() => Some((w.tip.to_string(), w.r.0 + w.r.2 / 2.0, Y0 + 46.0)),
+                        _ => None,
+                    }
+                }
+                None => None,
+            }
+        } else if let Some(i) = hover_ring {
+            let items = self.ring_items();
+            let n = items.len();
+            if i < n {
+                let (x, _) = self.ring_pos(i, n);
+                Some((items[i].tip().to_string(), x, ARCH_CY + ARCH_R + ARCH_H / 2.0 + 10.0))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if new_tip != self.tip {
+            self.tip = new_tip;
+            self.dirty = true;
         }
 
         if let Some((_, _, until)) = self.hud {
@@ -970,7 +1639,9 @@ impl App {
             || self.panel_anim.is_some()
             || self.hud.is_some()
             || self.toast.is_some()
-            || moving;
+            || moving
+            || height_moving
+            || self.drag.is_some();
         self.set_interval(if fast { 10 } else { 30 });
         if self.dirty {
             self.refresh();
@@ -1002,7 +1673,7 @@ impl App {
             if let Some(body) = poly_path(&self.body_pts, true) {
                 fill(&mut self.pixmap, &body, BODY, base);
                 if t > 0.05 {
-                    self.paint_sectors(base, t);
+                    self.paint_ring(base, t);
                 }
                 if self.pv < 0.05 {
                     stroke(&mut self.pixmap, &body, BORDER, 1.0, base);
@@ -1017,6 +1688,7 @@ impl App {
         self.paint_panel(base);
         self.paint_hud(base);
         self.paint_toast(base);
+        self.paint_tip(base);
     }
 
     fn paint_face(&mut self, base: Transform, fa: f32) {
@@ -1040,9 +1712,13 @@ impl App {
         };
         let happy = mode == Face::Charging || mode == Face::Full;
         let (dxp, dyp) = (self.face_dx, self.face_dy);
+        let eye = match eye_path() {
+            Some(p) => p,
+            None => return,
+        };
 
-        for sx in [-13.0f32, 13.0f32] {
-            let ex = CX + sx;
+        for sx in [-1.0f32, 1.0f32] {
+            let ex = CX + sx * 14.0;
             let ey = CAP_CY;
             if happy {
                 let pts = arc_pts(ex, ey + 3.0, 5.5, 205.0, 335.0, 10);
@@ -1050,19 +1726,16 @@ impl App {
                     stroke(&mut self.pixmap, &p, [col[0], col[1], col[2], a], 2.6, base);
                 }
             } else {
-                if let Some(p) = circle_path(ex, ey, 10.0) {
-                    fill(&mut self.pixmap, &p, [col[0], col[1], col[2], (30.0 * fa) as u8], base);
+                let mx = -sx;
+                let ox = dxp * 0.8;
+                let oy = dyp * 0.8;
+                let glows: [(f32, f32); 2] = [(1.55, 22.0), (1.25, 42.0)];
+                for (k, ga) in glows.iter() {
+                    let tf = base.pre_translate(ex + ox, ey + oy).pre_scale(mx * *k, *k * blink);
+                    fill(&mut self.pixmap, &eye, [col[0], col[1], col[2], (*ga * fa) as u8], tf);
                 }
-                let tf = base.pre_translate(ex, ey).pre_scale(0.88, 1.2 * blink);
-                if let Some(p) = circle_path(0.0, 0.0, 6.0) {
-                    fill(&mut self.pixmap, &p, [col[0], col[1], col[2], a], tf);
-                }
-                if blink > 0.5 {
-                    let tf2 = base.pre_translate(ex, ey);
-                    if let Some(p) = circle_path(dxp * 0.9, dyp * 0.9, 2.7) {
-                        fill(&mut self.pixmap, &p, [8, 8, 10, a], tf2);
-                    }
-                }
+                let tf = base.pre_translate(ex + ox, ey + oy).pre_scale(mx, blink);
+                fill(&mut self.pixmap, &eye, [col[0], col[1], col[2], a], tf);
             }
         }
         if mode == Face::Full {
@@ -1072,7 +1745,7 @@ impl App {
             }
         }
         if mode == Face::Hot {
-            let dx = CX + 31.0;
+            let dx = CX + 33.0;
             let dy = CAP_CY - 3.0;
             let drop = [(dx, dy - 6.0), (dx - 3.0, dy), (dx + 3.0, dy)];
             if let Some(p) = poly_path(&drop, true) {
@@ -1084,35 +1757,32 @@ impl App {
         }
     }
 
-    fn paint_sectors(&mut self, base: Transform, t: f32) {
+    fn paint_ring(&mut self, base: Transform, t: f32) {
         let fade = ((t - 0.5) / 0.4).clamp(0.0, 1.0);
         if fade <= 0.0 {
             return;
         }
-        for i in 0..3 {
-            if self.hl[i] < 0.01 {
-                continue;
+        let items = self.ring_items();
+        let n = items.len();
+        for (i, f) in items.iter().enumerate() {
+            let (x, y, _, _) = centerline(ring_s(i, n), t);
+            let hl = self.hl[i.min(15)];
+            let active = self.feat_active(*f);
+            if active {
+                if let Some(p) = circle_path(x, y, 13.5) {
+                    fill(&mut self.pixmap, &p, [ACCENT[0], ACCENT[1], ACCENT[2], (70.0 * fade) as u8], base);
+                }
             }
-            let (s0, s1) = SECTORS[i];
-            let pts = band_outline(s0, s1, t, 20, i == 0, i == 2);
-            if let Some(p) = poly_path(&pts, true) {
-                let al = (38.0 * self.hl[i] * fade) as u8;
-                fill(&mut self.pixmap, &p, [255, 255, 255, al], base);
+            if hl > 0.01 {
+                if let Some(p) = circle_path(x, y, 13.5) {
+                    fill(&mut self.pixmap, &p, [255, 255, 255, (46.0 * hl * fade) as u8], base);
+                }
             }
-        }
-        let seam = (40.0 * fade) as u8;
-        for s in [-1.0f32 / 3.0, 1.0f32 / 3.0] {
-            let (a, b) = edge_points(s, t);
-            line(&mut self.pixmap, base, [255, 255, 255, seam], 1.4, a, b);
-        }
-        let icons = [Icon::Note, Icon::Sliders, Icon::Calendar];
-        for i in 0..3 {
-            let (x, y, _, _) = centerline(SECTOR_S[i], t);
-            let hl = self.hl[i];
-            let col = [255u8, 255, 255, ((170.0 + 85.0 * hl) * fade) as u8];
-            let k = t.min(1.15) * (1.0 + 0.14 * hl);
+            let col = [255u8, 255, 255, ((190.0 + 65.0 * hl) * fade) as u8];
+            let k = t.min(1.15) * 0.82 * (1.0 + 0.16 * hl);
             let tf = base.pre_translate(x, y).pre_scale(k, k);
-            draw_icon(&mut self.pixmap, icons[i], tf, col);
+            let ic = self.feat_icon(*f);
+            draw_icon(&mut self.pixmap, ic, tf, col);
         }
     }
 
@@ -1134,21 +1804,23 @@ impl App {
         if ca < 0.02 {
             return;
         }
-        let white = [255u8, 255, 255, (235.0 * ca) as u8];
-        let x0 = CX - PANEL_W / 2.0;
-        self.txt(page_title(page), x0 + 16.0, MARGIN + 27.0, 14.0, white);
         self.paint_widgets(base, ca);
         match page {
-            Page::Media => {
+            Feat::Music => self.paint_music(ca),
+            Feat::Power => {
                 let dim = [255u8, 255, 255, (120.0 * ca) as u8];
-                self.txt_c("Scroll sisi kiri: kecerahan, sisi kanan: volume", CX, MARGIN + 182.0, 11.0, dim);
+                self.txt_c("Klik dua kali untuk mengonfirmasi", CX, Y0 + 138.0, 11.0, dim);
             }
-            Page::System => {}
-            Page::Hub => match self.hub_tab {
-                0 => self.paint_prayer(ca),
-                1 => self.paint_calendar(base, ca),
-                _ => self.paint_clips(ca),
-            },
+            Feat::Calendar => self.paint_calendar(base, ca),
+            Feat::Clip => self.paint_clips(ca),
+            Feat::Prayer => self.paint_prayer(ca),
+            Feat::Traffic => self.paint_traffic(base, ca),
+            Feat::Settings => {
+                let dim = [255u8, 255, 255, (130.0 * ca) as u8];
+                self.txt("Fitur di radial", X0 + 16.0, Y0 + 54.0, 11.0, dim);
+                self.txt("Tampilan dan sistem", X0 + 16.0, Y0 + 176.0, 11.0, dim);
+            }
+            _ => {}
         }
     }
 
@@ -1157,51 +1829,165 @@ impl App {
         let al = |v: f32| (v * ca) as u8;
         for (i, w) in ws.iter().enumerate() {
             let hov = self.hover_w == Some(i);
-            let pending = match self.confirm {
-                Some((a, t0)) => a == w.act && t0.elapsed().as_secs_f32() < 3.0,
-                None => false,
-            };
-            let bg = if pending {
-                [255, 80, 80, al(120.0)]
-            } else if w.on {
-                [ACCENT[0], ACCENT[1], ACCENT[2], al(80.0)]
-            } else if hov && w.enabled {
-                [255, 255, 255, al(42.0)]
-            } else {
-                [255, 255, 255, al(if w.enabled { 18.0 } else { 9.0 })]
-            };
             let (x, y, wdt, ht) = w.r;
-            if let Some(p) = rounded_rect(x, y, wdt, ht, 10.0) {
-                fill(&mut self.pixmap, &p, bg, base);
-            }
-            let white = [255u8, 255, 255, al(235.0)];
-            let has_label = !w.label.is_empty();
-            if w.icon != Icon::None {
-                let icon_cy = if has_label { y + ht * 0.38 } else { y + ht / 2.0 };
-                draw_icon(&mut self.pixmap, w.icon, base.pre_translate(x + wdt / 2.0, icon_cy), white);
-            }
-            if has_label {
-                let label = if pending { "Yakin?".to_string() } else { w.label.clone() };
-                let by = if w.icon == Icon::None { y + ht / 2.0 + 4.0 } else { y + ht - 9.0 };
-                self.txt_c(&label, x + wdt / 2.0, by, 11.0, white);
+            match w.kind {
+                WKind::Plain => {}
+                WKind::Slider => self.paint_slider(base, w, ca),
+                WKind::Toggle => self.paint_toggle(base, w, ca, hov),
+                WKind::Todo => self.paint_todo(base, w, ca, hov),
+                WKind::Button => {
+                    let pending = match self.confirm {
+                        Some((a, t0)) => a == w.act && t0.elapsed().as_secs_f32() < 3.0,
+                        None => false,
+                    };
+                    let danger = w.act == Act::Quit;
+                    let bg = if pending {
+                        [255, 80, 80, al(130.0)]
+                    } else if w.on {
+                        [ACCENT[0], ACCENT[1], ACCENT[2], al(if w.tab { 60.0 } else { 85.0 })]
+                    } else if hov && w.enabled {
+                        [255, 255, 255, al(if w.tab { 30.0 } else { 44.0 })]
+                    } else if w.tab {
+                        [255, 255, 255, 0]
+                    } else if danger {
+                        [255, 80, 80, al(40.0)]
+                    } else {
+                        [255, 255, 255, al(if w.enabled { 18.0 } else { 9.0 })]
+                    };
+                    let rad = if w.tab { 8.0 } else { 10.0 };
+                    if bg[3] > 0 {
+                        if let Some(p) = rounded_rect(x, y, wdt, ht, rad) {
+                            fill(&mut self.pixmap, &p, bg, base);
+                        }
+                    }
+                    let white = [255u8, 255, 255, al(235.0)];
+                    let has_label = !w.label.is_empty();
+                    if w.icon != Icon::None {
+                        let icon_cy = if has_label { y + ht * 0.38 } else { y + ht / 2.0 };
+                        let k = if w.tab { 0.8 } else { 1.0 };
+                        let tf = base.pre_translate(x + wdt / 2.0, icon_cy).pre_scale(k, k);
+                        draw_icon(&mut self.pixmap, w.icon, tf, white);
+                    }
+                    if has_label {
+                        let label = if pending { "Yakin?".to_string() } else { w.label.clone() };
+                        let fitted = self.fit(&label, 11.0, wdt - 8.0);
+                        let by = if w.icon == Icon::None { y + ht / 2.0 + 4.0 } else { y + ht - 9.0 };
+                        self.txt_c(&fitted, x + wdt / 2.0, by, 11.0, white);
+                    }
+                }
             }
         }
     }
 
+    fn paint_slider(&mut self, base: Transform, w: &Widget, ca: f32) {
+        let (x, y, wdt, _) = w.r;
+        let al = |v: f32| (v * ca) as u8;
+        let white = [255u8, 255, 255, al(235.0)];
+        let dim = [255u8, 255, 255, al(140.0)];
+        self.txt(&w.label, x, y + 12.0, 11.0, dim);
+        let vtxt = if w.val < 0.0 {
+            "N/A".to_string()
+        } else {
+            format!("{}%", (w.val * 100.0).round() as i32)
+        };
+        let tw = self.txt_w(&vtxt, 11.0);
+        self.txt(&vtxt, x + wdt - tw, y + 12.0, 11.0, white);
+        let ty = y + 22.0;
+        if let Some(p) = rounded_rect(x, ty, wdt, 6.0, 3.0) {
+            fill(&mut self.pixmap, &p, [255, 255, 255, al(36.0)], base);
+        }
+        if w.val >= 0.0 {
+            let fw = (wdt * w.val).max(6.0);
+            if let Some(p) = rounded_rect(x, ty, fw, 6.0, 3.0) {
+                fill(&mut self.pixmap, &p, [ACCENT[0], ACCENT[1], ACCENT[2], al(230.0)], base);
+            }
+            if let Some(p) = circle_path(x + fw, ty + 3.0, 7.0) {
+                fill(&mut self.pixmap, &p, white, base);
+            }
+        }
+    }
+
+    fn paint_toggle(&mut self, base: Transform, w: &Widget, ca: f32, hov: bool) {
+        let (x, y, wdt, ht) = w.r;
+        let al = |v: f32| (v * ca) as u8;
+        let (title, desc) = match w.label.split_once('\n') {
+            Some((a, b)) => (a.to_string(), b.to_string()),
+            None => (w.label.clone(), String::new()),
+        };
+        let bg = if hov && w.enabled { 36.0 } else { 16.0 };
+        if let Some(p) = rounded_rect(x, y, wdt, ht, 10.0) {
+            fill(&mut self.pixmap, &p, [255, 255, 255, al(bg)], base);
+        }
+        let tc = if w.enabled { [255u8, 255, 255, al(235.0)] } else { [255u8, 255, 255, al(110.0)] };
+        let dc = [255u8, 255, 255, al(125.0)];
+        self.txt(&title, x + 12.0, y + 19.0, 13.0, tc);
+        self.txt(&desc, x + 12.0, y + 35.0, 10.0, dc);
+        let sx = x + wdt - 52.0;
+        let sy = y + ht / 2.0 - 10.0;
+        let track = if w.on {
+            [ACCENT[0], ACCENT[1], ACCENT[2], al(220.0)]
+        } else {
+            [255, 255, 255, al(50.0)]
+        };
+        if let Some(p) = rounded_rect(sx, sy, 38.0, 20.0, 10.0) {
+            fill(&mut self.pixmap, &p, track, base);
+        }
+        let kx = if w.on { sx + 28.0 } else { sx + 10.0 };
+        if let Some(p) = circle_path(kx, sy + 10.0, 7.5) {
+            fill(&mut self.pixmap, &p, [255, 255, 255, al(if w.enabled { 245.0 } else { 120.0 })], base);
+        }
+    }
+
+    fn paint_todo(&mut self, base: Transform, w: &Widget, ca: f32, hov: bool) {
+        let (x, y, wdt, ht) = w.r;
+        let al = |v: f32| (v * ca) as u8;
+        if let Some(p) = rounded_rect(x, y, wdt, ht, 8.0) {
+            fill(&mut self.pixmap, &p, [255, 255, 255, al(if hov { 34.0 } else { 16.0 })], base);
+        }
+        if let Some(p) = rounded_rect(x + 6.0, y + 4.0, 14.0, 14.0, 4.0) {
+            if w.on {
+                fill(&mut self.pixmap, &p, [ACCENT[0], ACCENT[1], ACCENT[2], al(220.0)], base);
+                let tf = base.pre_translate(x + 13.0, y + 11.0).pre_scale(0.62, 0.62);
+                draw_icon(&mut self.pixmap, Icon::Check, tf, [8, 8, 10, al(255.0)]);
+            } else {
+                stroke(&mut self.pixmap, &p, [255, 255, 255, al(200.0)], 1.5, base);
+            }
+        }
+        let fitted = self.fit(&w.label, 12.0, wdt - 36.0);
+        let c = if w.on { [255u8, 255, 255, al(110.0)] } else { [255u8, 255, 255, al(235.0)] };
+        self.txt(&fitted, x + 28.0, y + 16.0, 12.0, c);
+    }
+
+    fn paint_music(&mut self, ca: f32) {
+        let dim = [255u8, 255, 255, (130.0 * ca) as u8];
+        self.txt_c("Mengendalikan pemutar yang sedang aktif", CX, Y0 + 130.0, 11.0, dim);
+        self.txt_c("(Spotify, YouTube, dan pemutar lainnya)", CX, Y0 + 145.0, 10.0, dim);
+    }
+
     fn paint_prayer(&mut self, ca: f32) {
-        let y0 = MARGIN;
         let white = [255u8, 255, 255, (235.0 * ca) as u8];
         let dim = [255u8, 255, 255, (130.0 * ca) as u8];
         let accent = [ACCENT[0], ACCENT[1], ACCENT[2], (255.0 * ca) as u8];
+
+        if let Some(p) = self.city_page {
+            let pages = (CITIES.len() - 1) / 10 + 1;
+            let s = format!("{}/{}", p + 1, pages);
+            self.txt_c(&s, CX + 109.0, Y0 + 224.0, 11.0, dim);
+            return;
+        }
+        self.txt("Jadwal shalat", X0 + 16.0, Y0 + 61.0, 12.0, dim);
+
         let (status, times) = match self.prayer.lock() {
             Ok(g) => (g.status, g.times.clone()),
             Err(_) => (2u8, Vec::new()),
         };
         if times.len() < 6 {
-            let msg = if status == 2 { "Gagal memuat jadwal. Periksa internet." } else { "Memuat jadwal shalat…" };
-            self.txt_c(msg, CX, y0 + 140.0, 13.0, dim);
-            let city = format!("Kota: {}", self.city);
-            self.txt_c(&city, CX, y0 + 164.0, 11.0, dim);
+            let msg = if status == 2 {
+                "Gagal memuat jadwal. Periksa internet."
+            } else {
+                "Memuat jadwal shalat…"
+            };
+            self.txt_c(msg, CX, Y0 + 140.0, 13.0, dim);
             return;
         }
         let lt = sys::now_local();
@@ -1227,37 +2013,41 @@ impl App {
             }
         };
         let head = format!("Menuju {}", times[ni].0);
-        self.txt_c(&head, CX, y0 + 100.0, 13.0, dim);
+        self.txt_c(&head, CX, Y0 + 96.0, 13.0, dim);
         let clock = format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60);
-        self.txt_c(&clock, CX, y0 + 142.0, 36.0, white);
+        self.txt_c(&clock, CX, Y0 + 138.0, 36.0, white);
         for i in 0..6 {
             let col = i % 3;
             let row = i / 3;
             let x = CX - 150.0 + (col as f32) * 104.0;
-            let by = y0 + 178.0 + (row as f32) * 24.0;
+            let by = Y0 + 178.0 + (row as f32) * 24.0;
             let s = format!("{} {:02}:{:02}", times[i].0, times[i].1 / 60, times[i].1 % 60);
-            let c = if i == ni { accent } else if i == 0 && !ramadan { dim } else { white };
+            let c = if i == ni {
+                accent
+            } else if i == 0 && !ramadan {
+                dim
+            } else {
+                white
+            };
             self.txt(&s, x, by, 12.0, c);
         }
-        let city = format!("{} • metode Kemenag RI", self.city);
-        self.txt_c(&city, CX, y0 + 248.0, 11.0, dim);
+        self.txt_c("Metode Kemenag RI (Aladhan)", CX, Y0 + 236.0, 10.0, dim);
     }
 
     fn paint_calendar(&mut self, base: Transform, ca: f32) {
-        let y0 = MARGIN;
         let white = [255u8, 255, 255, (235.0 * ca) as u8];
         let dim = [255u8, 255, 255, (130.0 * ca) as u8];
-        let red = [255u8, 130, 130, (235.0 * ca) as u8];
+        let red = [255u8, 130, 130, (240.0 * ca) as u8];
         let lt = sys::now_local();
         let (yy, mm) = (self.cal_year, self.cal_month);
         let title = format!("{} {}", cal::BULAN[(mm - 1) as usize], yy);
-        self.txt_c(&title, CX, y0 + 96.0, 14.0, white);
+        self.txt_c(&title, CX, Y0 + 62.0, 14.0, white);
 
         let heads = ["Sen", "Sel", "Rab", "Kam", "Jum", "Sab", "Min"];
         for i in 0..7 {
             let cx = CX - 132.0 + (i as f32) * 44.0;
             let c = if i == 6 { red } else { dim };
-            self.txt_c(heads[i], cx, y0 + 120.0, 10.0, c);
+            self.txt_c(heads[i], cx, Y0 + 84.0, 10.0, c);
         }
         let first = cal::weekday(cal::days_from_civil(yy, mm, 1));
         let first_idx = (first + 6) % 7;
@@ -1267,36 +2057,91 @@ impl App {
             let row = idx / 7;
             let col = idx % 7;
             let cx = CX - 132.0 + (col as f32) * 44.0;
-            let by = y0 + 142.0 + (row as f32) * 17.0;
+            let by = Y0 + 96.0 + (row as f32) * 16.0;
+            let is_sel = self.cal_sel == (yy, mm, d);
             let is_today = yy == lt.year && mm == lt.month && d == lt.day;
-            if is_today {
-                if let Some(p) = rounded_rect(cx - 12.0, by - 13.0, 24.0, 17.0, 6.0) {
-                    fill(&mut self.pixmap, &p, [ACCENT[0], ACCENT[1], ACCENT[2], (200.0 * ca) as u8], base);
+            if is_sel {
+                if let Some(p) = rounded_rect(cx - 12.0, by - 12.0, 24.0, 16.0, 6.0) {
+                    fill(&mut self.pixmap, &p, [ACCENT[0], ACCENT[1], ACCENT[2], (210.0 * ca) as u8], base);
+                }
+            } else if is_today {
+                if let Some(p) = rounded_rect(cx - 12.0, by - 12.0, 24.0, 16.0, 6.0) {
+                    stroke(&mut self.pixmap, &p, [ACCENT[0], ACCENT[1], ACCENT[2], (200.0 * ca) as u8], 1.4, base);
                 }
             }
-            let c = if col == 6 { red } else { white };
-            self.txt_c(&d.to_string(), cx, by, 12.0, c);
+            let holiday = cal::holiday(yy, mm, d).is_some();
+            let c = if is_sel {
+                [8u8, 8, 10, (255.0 * ca) as u8]
+            } else if col == 6 || holiday {
+                red
+            } else {
+                white
+            };
+            self.txt_c(&d.to_string(), cx, by, 11.0, c);
+            let key = (yy as u32) * 10000 + mm * 100 + d;
+            if self.todos.iter().any(|t| t.date == key && !t.done) {
+                if let Some(p) = circle_path(cx, by + 3.0, 1.3) {
+                    fill(&mut self.pixmap, &p, [ACCENT[0], ACCENT[1], ACCENT[2], (255.0 * ca) as u8], base);
+                }
+            }
         }
 
-        let days = cal::days_from_civil(lt.year, lt.month, lt.day);
-        let (hy, hm, hd) = cal::hijri(days);
-        let info = format!(
-            "{} {} • {} {} {} H",
+        let (sy, sm, sd) = self.cal_sel;
+        let days = cal::days_from_civil(sy, sm, sd);
+        let line1 = format!(
+            "{}, {} {} {}",
             cal::HARI[cal::weekday(days)],
-            cal::PASARAN[cal::pasaran(days)],
-            hd,
-            cal::HIJRI[((hm - 1).max(0).min(11)) as usize],
-            hy
+            sd,
+            cal::BULAN[(sm - 1) as usize],
+            sy
         );
-        self.txt_c(&info, CX, y0 + 252.0, 12.0, white);
+        self.txt_c(&line1, CX, Y0 + 204.0, 12.0, white);
+        let mut parts: Vec<String> = Vec::new();
+        if self.cfg.show_jawa {
+            parts.push(cal::PASARAN[cal::pasaran(days)].to_string());
+        }
+        if self.cfg.show_hijri {
+            let (hy, hm, hd) = cal::hijri(days);
+            let name = cal::HIJRI[((hm - 1).max(0).min(11)) as usize];
+            parts.push(format!("{} {} {} H", hd, name, hy));
+        }
+        if !parts.is_empty() {
+            let line2 = parts.join(" • ");
+            self.txt_c(&line2, CX, Y0 + 220.0, 11.0, dim);
+        }
+        if let Some(h) = cal::holiday(sy, sm, sd) {
+            self.txt_c(h, CX, Y0 + 235.0, 11.0, red);
+        }
+
+        self.txt("Tugas", X0 + 16.0, Y0 + 247.0, 11.0, dim);
+        if let Some(buf) = self.input.clone() {
+            let rows = self.todo_rows();
+            let y = Y0 + 252.0 + 23.0 * (rows.len() as f32);
+            if let Some(p) = rounded_rect(X0 + 14.0, y, 312.0, 22.0, 8.0) {
+                fill(&mut self.pixmap, &p, [255, 255, 255, (22.0 * ca) as u8], base);
+                stroke(&mut self.pixmap, &p, [ACCENT[0], ACCENT[1], ACCENT[2], (230.0 * ca) as u8], 1.4, base);
+            }
+            let shown = if buf.is_empty() {
+                String::from("Ketik tugas, Enter untuk simpan, Esc batal")
+            } else {
+                buf.clone()
+            };
+            let fitted = self.fit(&shown, 12.0, 290.0);
+            let c = if buf.is_empty() { dim } else { white };
+            self.txt(&fitted, X0 + 22.0, y + 16.0, 12.0, c);
+            if self.caret_phase && !buf.is_empty() {
+                let tw = self.txt_w(&fitted, 12.0);
+                let cx = X0 + 22.0 + tw + 1.0;
+                line(&mut self.pixmap, base, white, 1.4, (cx, y + 4.0), (cx, y + 18.0));
+            }
+        }
     }
 
     fn paint_clips(&mut self, ca: f32) {
-        let y0 = MARGIN;
         let white = [255u8, 255, 255, (235.0 * ca) as u8];
         let dim = [255u8, 255, 255, (130.0 * ca) as u8];
         if self.clips.is_empty() {
-            self.txt_c("Belum ada yang disalin", CX, y0 + 140.0, 13.0, dim);
+            self.txt_c("Belum ada yang disalin", CX, Y0 + 120.0, 13.0, dim);
             return;
         }
         let n = self.clips.len().min(5);
@@ -1312,7 +2157,45 @@ impl App {
                 text
             };
             let fitted = self.fit(&shown, 12.0, 292.0);
-            self.txt(&fitted, CX - 150.0, y0 + 82.0 + (i as f32) * 30.0 + 18.0, 12.0, white);
+            self.txt(&fitted, X0 + 24.0, Y0 + 46.0 + (i as f32) * 31.0 + 18.0, 12.0, white);
+        }
+    }
+
+    fn paint_traffic(&mut self, base: Transform, ca: f32) {
+        let white = [255u8, 255, 255, (235.0 * ca) as u8];
+        let dim = [255u8, 255, 255, (130.0 * ca) as u8];
+        let down = fmt_rate(self.traffic.down);
+        let up = fmt_rate(self.traffic.up);
+        self.txt("↓ Unduh", X0 + 16.0, Y0 + 66.0, 12.0, dim);
+        self.txt(&down, X0 + 16.0, Y0 + 90.0, 22.0, white);
+        self.txt("↑ Unggah", X0 + 186.0, Y0 + 66.0, 12.0, dim);
+        self.txt(&up, X0 + 186.0, Y0 + 90.0, 22.0, white);
+
+        let (gx, gy, gw, gh) = (X0 + 14.0, Y0 + 108.0, 312.0f32, 56.0f32);
+        if let Some(p) = rounded_rect(gx, gy, gw, gh, 8.0) {
+            fill(&mut self.pixmap, &p, [255, 255, 255, (14.0 * ca) as u8], base);
+        }
+        let hist = self.traffic.hist.clone();
+        if hist.len() >= 2 {
+            let mut maxv = 1024.0f32;
+            for v in hist.iter() {
+                if *v > maxv {
+                    maxv = *v;
+                }
+            }
+            let mut pts: Vec<Pt> = Vec::new();
+            for (i, v) in hist.iter().enumerate() {
+                let x = gx + 6.0 + (gw - 12.0) * (i as f32) / 59.0;
+                let y = gy + gh - 6.0 - (gh - 12.0) * (*v / maxv);
+                pts.push((x, y));
+            }
+            if let Some(p) = poly_path(&pts, false) {
+                stroke(&mut self.pixmap, &p, [ACCENT[0], ACCENT[1], ACCENT[2], (240.0 * ca) as u8], 1.8, base);
+            }
+        }
+        self.txt_c("60 detik terakhir (unduh)", CX, Y0 + 180.0, 10.0, dim);
+        if !self.cfg.on[Feat::Traffic.idx()] {
+            self.txt_c("Addon ini mati. Nyalakan di Addons.", CX, Y0 + 150.0, 11.0, dim);
         }
     }
 
@@ -1384,6 +2267,20 @@ impl App {
         }
         let fitted = self.fit(&msg, 12.0, w - 20.0);
         self.txt_c(&fitted, CX, y + 19.0, 12.0, [255, 255, 255, al(235.0)]);
+    }
+
+    fn paint_tip(&mut self, base: Transform) {
+        let (s, cx, y) = match &self.tip {
+            Some(t) => t.clone(),
+            None => return,
+        };
+        let w = self.txt_w(&s, 11.0) + 22.0;
+        let x = (cx - w / 2.0).max(4.0).min(W - w - 4.0);
+        if let Some(p) = rounded_rect(x, y, w, 22.0, 11.0) {
+            fill(&mut self.pixmap, &p, [30, 30, 36, 250], base);
+            stroke(&mut self.pixmap, &p, [255, 255, 255, 50], 1.0, base);
+        }
+        self.txt(&s, x + 11.0, y + 15.0, 11.0, [255, 255, 255, 240]);
     }
 
     /// Kirim gambar ke jendela (per-piksel transparan).
@@ -1467,6 +2364,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam:
         }
         WM_LBUTTONDOWN => {
             with_app(|a| a.on_click());
+            0
+        }
+        WM_CHAR => {
+            let c = wparam as u32;
+            with_app(|a| a.on_char(c));
+            0
+        }
+        WM_KILLFOCUS => {
+            with_app(|a| a.cancel_input());
             0
         }
         0x031D => {

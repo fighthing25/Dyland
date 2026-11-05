@@ -7,7 +7,7 @@ pub type Pt = (f32, f32);
 
 // Ukuran area gambar dan bentuk (sama dengan versi Python Fase 1)
 pub const W: f32 = 400.0;
-pub const H: f32 = 330.0;
+pub const H: f32 = 430.0;
 pub const CX: f32 = W / 2.0;
 pub const MARGIN: f32 = 10.0;
 pub const CAP_W: f32 = 170.0;
@@ -242,5 +242,14 @@ pub fn glyph(c: char) -> Vec<Vec<Pt>> {
             vec![(0.45, 2.7), (1.55, 2.7)],
         ],
         _ => vec![],
+    }
+}
+
+/// Posisi ikon ke-i dari n ikon di sepanjang busur (s antara -1 dan 1).
+pub fn ring_s(i: usize, n: usize) -> f32 {
+    if n <= 1 {
+        0.0
+    } else {
+        -0.86 + 1.72 * (i as f32) / ((n - 1) as f32)
     }
 }

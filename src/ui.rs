@@ -109,6 +109,14 @@ pub enum Icon {
     Sliders,
     Calendar,
     Sun,
+    SpeakerOff,
+    Clipboard,
+    Mosque,
+    Chart,
+    Puzzle,
+    Gear,
+    Plus,
+    Check,
 }
 
 pub fn draw_icon(px: &mut Pixmap, ic: Icon, tf: Transform, c: [u8; 4]) {
@@ -147,6 +155,72 @@ pub fn draw_icon(px: &mut Pixmap, ic: Icon, tf: Transform, c: [u8; 4]) {
                 let pts = arc_pts(1.0, 0.0, r, -55.0, 55.0, 8);
                 polyline(px, tf, c, 1.8, &pts, false);
             }
+        }
+        Icon::SpeakerOff => {
+            let body: [Pt; 6] = [(-8.0, -3.0), (-4.0, -3.0), (1.0, -7.0), (1.0, 7.0), (-4.0, 3.0), (-8.0, 3.0)];
+            if let Some(p) = poly_path(&body, true) {
+                fill(px, &p, c, tf);
+            }
+            line(px, tf, [255, 90, 90, c[3]], 2.2, (-9.0, -9.0), (9.0, 9.0));
+        }
+        Icon::Clipboard => {
+            if let Some(p) = rounded_rect(-7.0, -8.0, 14.0, 17.0, 2.5) {
+                stroke(px, &p, c, 1.8, tf);
+            }
+            if let Some(p) = rounded_rect(-3.5, -10.5, 7.0, 4.5, 1.8) {
+                fill(px, &p, c, tf);
+            }
+            line(px, tf, c, 1.6, (-4.0, -1.0), (4.0, -1.0));
+            line(px, tf, c, 1.6, (-4.0, 3.0), (4.0, 3.0));
+        }
+        Icon::Mosque => {
+            let dome = arc_pts(0.0, 2.0, 6.5, 180.0, 360.0, 12);
+            polyline(px, tf, c, 1.8, &dome, false);
+            line(px, tf, c, 1.8, (-8.5, 2.0), (8.5, 2.0));
+            line(px, tf, c, 1.8, (-8.0, 2.0), (-8.0, 9.0));
+            line(px, tf, c, 1.8, (8.0, 2.0), (8.0, 9.0));
+            line(px, tf, c, 1.8, (-8.0, 9.0), (8.0, 9.0));
+            line(px, tf, c, 1.6, (0.0, -4.5), (0.0, -9.5));
+        }
+        Icon::Chart => {
+            line(px, tf, c, 3.4, (-6.0, 9.0), (-6.0, 3.0));
+            line(px, tf, c, 3.4, (0.0, 9.0), (0.0, -3.0));
+            line(px, tf, c, 3.4, (6.0, 9.0), (6.0, -8.0));
+        }
+        Icon::Puzzle => {
+            for (x, y) in [(-9.5f32, -9.5f32), (1.5f32, -9.5f32), (-9.5f32, 1.5f32)] {
+                if let Some(p) = rounded_rect(x, y, 8.0, 8.0, 2.0) {
+                    stroke(px, &p, c, 1.7, tf);
+                }
+            }
+            line(px, tf, c, 1.8, (5.5, 2.5), (5.5, 9.5));
+            line(px, tf, c, 1.8, (2.0, 6.0), (9.0, 6.0));
+        }
+        Icon::Gear => {
+            if let Some(p) = circle_path(0.0, 0.0, 5.6) {
+                stroke(px, &p, c, 1.8, tf);
+            }
+            if let Some(p) = circle_path(0.0, 0.0, 2.0) {
+                fill(px, &p, c, tf);
+            }
+            for k in 0..8 {
+                let a = (k as f32) * std::f32::consts::PI / 4.0;
+                line(
+                    px,
+                    tf,
+                    c,
+                    3.0,
+                    (7.4 * a.cos(), 7.4 * a.sin()),
+                    (9.2 * a.cos(), 9.2 * a.sin()),
+                );
+            }
+        }
+        Icon::Plus => {
+            line(px, tf, c, 2.0, (-6.0, 0.0), (6.0, 0.0));
+            line(px, tf, c, 2.0, (0.0, -6.0), (0.0, 6.0));
+        }
+        Icon::Check => {
+            polyline(px, tf, c, 2.2, &[(-5.0, 0.0), (-1.5, 4.0), (5.0, -4.5)], false);
         }
         Icon::Camera => {
             if let Some(p) = rounded_rect(-10.0, -5.0, 20.0, 14.0, 3.0) {
