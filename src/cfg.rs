@@ -1,10 +1,10 @@
 //! Pengaturan dan daftar tugas yang disimpan di %APPDATA%\Dyland.
 
-pub const N_FEAT: usize = 13;
+pub const N_FEAT: usize = 15;
 
 pub const FEAT_KEYS: [&str; N_FEAT] = [
-    "musik", "suara", "mic", "screenshot", "awake", "kunci", "daya", "kalender", "clipboard", "shalat", "traffic",
-    "addons", "pengaturan",
+    "musik", "suara", "mic", "screenshot", "awake", "kunci", "daya", "kalender", "clipboard", "rak", "hp", "shalat",
+    "traffic", "addons", "pengaturan",
 ];
 
 #[derive(Clone)]
@@ -14,6 +14,7 @@ pub struct Cfg {
     pub show_jawa: bool,
     pub show_hijri: bool,
     pub notify: bool,
+    pub phone_on: bool,
     pub on: [bool; N_FEAT],
 }
 
@@ -24,13 +25,14 @@ fn dir() -> Option<String> {
 impl Cfg {
     pub fn new() -> Cfg {
         let mut on = [true; N_FEAT];
-        on[10] = false; // traffic monitor: addon, mati secara bawaan
+        on[12] = false; // traffic monitor: addon, mati secara bawaan
         Cfg {
             city: String::from("Jakarta"),
             country: String::from("Indonesia"),
             show_jawa: true,
             show_hijri: true,
             notify: true,
+            phone_on: false,
             on,
         }
     }
@@ -58,6 +60,7 @@ impl Cfg {
                             "jawa" => c.show_jawa = b,
                             "hijri" => c.show_hijri = b,
                             "notifikasi" => c.notify = b,
+                            "hp_aktif" => c.phone_on = b,
                             _ => {
                                 if let Some(name) = k.strip_prefix("fitur_") {
                                     for i in 0..N_FEAT {
@@ -72,8 +75,8 @@ impl Cfg {
                 }
             }
         }
-        c.on[11] = true;
-        c.on[12] = true;
+        c.on[13] = true;
+        c.on[14] = true;
         c
     }
 
@@ -86,6 +89,7 @@ impl Cfg {
             s.push_str(&format!("jawa={}\r\n", if self.show_jawa { 1 } else { 0 }));
             s.push_str(&format!("hijri={}\r\n", if self.show_hijri { 1 } else { 0 }));
             s.push_str(&format!("notifikasi={}\r\n", if self.notify { 1 } else { 0 }));
+            s.push_str(&format!("hp_aktif={}\r\n", if self.phone_on { 1 } else { 0 }));
             for i in 0..N_FEAT {
                 s.push_str(&format!("fitur_{}={}\r\n", FEAT_KEYS[i], if self.on[i] { 1 } else { 0 }));
             }

@@ -21,6 +21,7 @@ use winapi::um::iphlpapi::GetIfTable;
 use winapi::um::minwinbase::SYSTEMTIME;
 use winapi::um::mmdeviceapi::{eCapture, eConsole, eRender, EDataFlow, IMMDevice, IMMDeviceEnumerator};
 use winapi::um::processthreadsapi::GetSystemTimes;
+use winapi::um::shellapi::ShellExecuteW;
 use winapi::um::sysinfoapi::GetLocalTime;
 use winapi::um::wingdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject, BITMAPINFO,
@@ -346,6 +347,14 @@ pub fn lock_pc() {
 
 pub fn open_sound_settings() {
     let _ = Command::new("explorer").arg("ms-settings:sound").spawn();
+}
+
+pub fn shell_open(path: &str) {
+    unsafe {
+        let op = wide("open");
+        let p = wide(path);
+        ShellExecuteW(null_mut(), op.as_ptr(), p.as_ptr(), null(), null(), SW_SHOWNORMAL);
+    }
 }
 
 pub fn beep() {

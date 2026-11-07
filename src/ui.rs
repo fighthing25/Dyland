@@ -117,6 +117,8 @@ pub enum Icon {
     Gear,
     Plus,
     Check,
+    Shelf,
+    Phone,
 }
 
 pub fn draw_icon(px: &mut Pixmap, ic: Icon, tf: Transform, c: [u8; 4]) {
@@ -221,6 +223,18 @@ pub fn draw_icon(px: &mut Pixmap, ic: Icon, tf: Transform, c: [u8; 4]) {
         }
         Icon::Check => {
             polyline(px, tf, c, 2.2, &[(-5.0, 0.0), (-1.5, 4.0), (5.0, -4.5)], false);
+        }
+        Icon::Shelf => {
+            polyline(px, tf, c, 1.9, &[(-9.0, -1.0), (-9.0, 8.0), (9.0, 8.0), (9.0, -1.0)], false);
+            line(px, tf, c, 1.9, (0.0, -9.0), (0.0, 3.0));
+            polyline(px, tf, c, 1.9, &[(-4.5, -1.5), (0.0, 3.0), (4.5, -1.5)], false);
+        }
+        Icon::Phone => {
+            if let Some(p) = rounded_rect(-5.5, -9.5, 11.0, 19.0, 2.8) {
+                stroke(px, &p, c, 1.8, tf);
+            }
+            line(px, tf, c, 1.8, (-2.0, 6.0), (2.0, 6.0));
+            line(px, tf, c, 1.4, (-2.0, -6.5), (2.0, -6.5));
         }
         Icon::Camera => {
             if let Some(p) = rounded_rect(-10.0, -5.0, 20.0, 14.0, 3.0) {

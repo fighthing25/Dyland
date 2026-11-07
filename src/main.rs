@@ -11,14 +11,16 @@ mod cfg;
 mod geo;
 mod sys;
 mod ui;
+mod web;
 
 use cfg::{Cfg, Todo, N_FEAT};
 use geo::*;
 use std::cell::RefCell;
 use std::mem;
 use std::ptr::{null, null_mut};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use tiny_skia::{Color, Path, PathBuilder, Pixmap, Transform};
+use tiny_skia::{Color, Path, PathBuilder, Pixmap, Rect, Transform};
 use ui::*;
 use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
 use winapi::shared::windef::{HDC, HWND, POINT, SIZE};
@@ -29,6 +31,7 @@ use winapi::um::wingdi::{
     CreateCompatibleDC, CreateDIBSection, GetDeviceCaps, SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO,
     BLENDFUNCTION, DIB_RGB_COLORS, LOGPIXELSX,
 };
+use winapi::um::shellapi::{DragFinish, DragQueryFileW, HDROP};
 use winapi::um::winuser::*;
 
 // ---------------------------------------------------------------------------
@@ -67,6 +70,8 @@ enum Feat {
     Power,
     Calendar,
     Clip,
+    Shelf,
+    Phone,
     Prayer,
     Traffic,
     Addons,
@@ -83,6 +88,8 @@ const FEATS: [Feat; N_FEAT] = [
     Feat::Power,
     Feat::Calendar,
     Feat::Clip,
+    Feat::Shelf,
+    Feat::Phone,
     Feat::Prayer,
     Feat::Traffic,
     Feat::Addons,
@@ -105,6 +112,8 @@ impl Feat {
             Feat::Power => Icon::Power,
             Feat::Calendar => Icon::Calendar,
             Feat::Clip => Icon::Clipboard,
+            Feat::Shelf => Icon::Shelf,
+            Feat::Phone => Icon::Phone,
             Feat::Prayer => Icon::Mosque,
             Feat::Traffic => Icon::Chart,
             Feat::Addons => Icon::Puzzle,
@@ -123,6 +132,8 @@ impl Feat {
             Feat::Power => "Tidur, restart, matikan",
             Feat::Calendar => "Kalender, hari libur, dan tugas",
             Feat::Clip => "Riwayat clipboard",
+            Feat::Shelf => "Rak file: tarik file ke pulau, buka dari sini",
+            Feat::Phone => "Sambung HP: kirim file dan teks lewat browser",
             Feat::Prayer => "Jadwal shalat (addon)",
             Feat::Traffic => "Monitor lalu lintas internet (addon)",
             Feat::Addons => "Addons: tambah atau sembunyikan fitur",
@@ -137,10 +148,12 @@ impl Feat {
             Feat::Power => 150.0,
             Feat::Calendar => 350.0,
             Feat::Clip => 240.0,
+            Feat::Shelf => 250.0,
+            Feat::Phone => 244.0,
             Feat::Prayer => 250.0,
             Feat::Traffic => 190.0,
             Feat::Addons => 210.0,
-            Feat::Settings => 300.0,
+            Feat::Settings => 330.0,
             _ => 160.0,
         }
     }
@@ -176,6 +189,12 @@ enum Act {
     TodoAdd,
     ClipCopy(usize),
     ClipClear,
+    ShelfOpen(usize),
+    ShelfDel(usize),
+    ShelfClear,
+    PhoneToggle,
+    PhoneNewPin,
+    OpenInbox,
     CityBtn,
     City(usize),
     CityPrev,
@@ -275,6 +294,18 @@ fn fmt_rate(b: f32) -> String {
     }
 }
 
+fn fmt_size(b: u64) -> String {
+    if b < 1024 {
+        format!("{} B", b)
+    } else if b < 1024 * 1024 {
+        format!("{} KB", b / 1024)
+    } else if b < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", (b as f64) / 1048576.0)
+    } else {
+        format!("{:.2} GB", (b as f64) / 1073741824.0)
+    }
+}
+
 /// Bentuk mata Venom (mata kiri; ujung runcing di bagian dalam bawah).
 fn eye_path() -> Option<Path> {
     let mut pb = PathBuilder::new();
@@ -336,6 +367,10 @@ struct App {
     toast: Option<(String, Instant)>,
     bright: sys::Brightness,
     traffic: sys::Traffic,
+    web_shared: web::WebShared,
+    web: Option<web::WebServer>,
+    phone_ip: Option<String>,
+    qr: Option<(usize, Vec<bool>)>,
     shot_result: sys::ShotResult,
     vol_pct: Option<i32>,
     bri_pct: Option<i32>,
@@ -426,6 +461,10 @@ impl App {
             toast: None,
             bright: sys::Brightness::new(),
             traffic: sys::Traffic::new(),
+            web_shared: web::new_shared(),
+            web: None,
+            phone_ip: None,
+            qr: None,
             shot_result: sys::new_shot_result(),
             vol_pct: None,
             bri_pct: None,
@@ -561,9 +600,10 @@ impl App {
 
     fn ring_hit(&self, mx: f32, my: f32) -> Option<usize> {
         let n = self.ring_items().len();
+        let rad = (148.0 / ((n.max(2) - 1) as f32)).min(12.5);
         for i in 0..n {
             let (x, y) = self.ring_pos(i, n);
-            if (mx - x) * (mx - x) + (my - y) * (my - y) <= 12.5 * 12.5 {
+            if (mx - x) * (mx - x) + (my - y) * (my - y) <= rad * rad {
                 return Some(i);
             }
         }
@@ -639,6 +679,12 @@ impl App {
                 self.cal_year = lt.year;
                 self.cal_month = lt.month;
                 self.cal_sel = (lt.year, lt.month, lt.day);
+            }
+            Feat::Phone => {
+                if self.web.is_some() {
+                    self.phone_ip = web::local_ip();
+                    self.update_qr();
+                }
             }
             Feat::Settings => {
                 self.startup = sys::startup_enabled();
@@ -733,9 +779,9 @@ impl App {
         // deretan tab fitur di bagian atas panel
         let items = self.ring_items();
         let n = items.len();
-        let area_w = 262.0f32;
+        let area_w = 284.0f32;
         let sp = (area_w / (n as f32)).min(24.0);
-        let start = CX - 152.0 + (area_w - sp * (n as f32)) / 2.0 + sp / 2.0;
+        let start = CX - 156.0 + (area_w - sp * (n as f32)) / 2.0 + sp / 2.0;
         for (i, f) in items.iter().enumerate() {
             let cx = start + sp * (i as f32);
             let mut w = wd((cx - sp / 2.0, Y0 + 8.0, sp, 26.0), Act::Feature(*f), "", self.feat_icon(*f));
@@ -819,7 +865,6 @@ impl App {
                     v.push(w);
                     let mut x = wd((X0 + 294.0, y, 32.0, 22.0), Act::TodoDel(i), "", Icon::Close);
                     x.tab = true;
-                    x.tip = "Hapus tugas";
                     v.push(x);
                     y += 23.0;
                 }
@@ -863,6 +908,29 @@ impl App {
                     v.push(wd((CX + 8.0, Y0 + 44.0, 150.0, 24.0), Act::CityBtn, &label, Icon::None));
                 }
             }
+            Feat::Shelf => {
+                let list = web::shelf_list(&self.web_shared);
+                for (i, _f) in list.iter().enumerate().take(5) {
+                    let y = Y0 + 46.0 + (i as f32) * 32.0;
+                    let mut d = wd((X0 + 294.0, y, 32.0, 27.0), Act::ShelfDel(i), "", Icon::Close);
+                    d.tab = true;
+                    v.push(d);
+                    let o = wd((X0 + 14.0, y, 276.0, 27.0), Act::ShelfOpen(i), "", Icon::None);
+                    v.push(o);
+                }
+                if !list.is_empty() {
+                    v.push(wd((X0 + 14.0, Y0 + 210.0, 312.0, 26.0), Act::ShelfClear, "Kosongkan rak", Icon::None));
+                }
+            }
+            Feat::Phone => {
+                if self.web.is_some() {
+                    v.push(wd((X0 + 144.0, Y0 + 140.0, 86.0, 26.0), Act::PhoneNewPin, "Acak PIN", Icon::None));
+                    v.push(wd((X0 + 240.0, Y0 + 140.0, 86.0, 26.0), Act::PhoneToggle, "Matikan", Icon::None));
+                    v.push(wd((X0 + 14.0, Y0 + 208.0, 312.0, 26.0), Act::OpenInbox, "Buka folder file dari HP", Icon::None));
+                } else {
+                    v.push(wd((X0 + 14.0, Y0 + 52.0, 312.0, 38.0), Act::PhoneToggle, "Nyalakan Sambung HP", Icon::Phone));
+                }
+            }
             Feat::Traffic => {}
             Feat::Addons => {
                 let rows: [(Feat, &str); 3] = [
@@ -882,7 +950,7 @@ impl App {
                 }
             }
             Feat::Settings => {
-                let feats: [(Feat, &str); 9] = [
+                let feats: [(Feat, &str); 11] = [
                     (Feat::Music, "Musik"),
                     (Feat::Sound, "Suara"),
                     (Feat::Mic, "Mikrofon"),
@@ -892,6 +960,8 @@ impl App {
                     (Feat::Power, "Daya"),
                     (Feat::Calendar, "Kalender"),
                     (Feat::Clip, "Clipboard"),
+                    (Feat::Shelf, "Rak file"),
+                    (Feat::Phone, "Sambung HP"),
                 ];
                 for (i, (f, name)) in feats.iter().enumerate() {
                     let c = (i % 3) as f32;
@@ -915,7 +985,7 @@ impl App {
                     let c = (i % 2) as f32;
                     let r = (i / 2) as f32;
                     let mut w = wd(
-                        (CX - 158.0 + c * 162.0, Y0 + 182.0 + r * 32.0, 154.0, 26.0),
+                        (CX - 158.0 + c * 162.0, Y0 + 214.0 + r * 32.0, 154.0, 26.0),
                         *act,
                         name,
                         Icon::None,
@@ -923,7 +993,7 @@ impl App {
                     w.on = *on;
                     v.push(w);
                 }
-                v.push(wd((CX - 158.0, Y0 + 254.0, 316.0, 30.0), Act::Quit, "Keluar dari DYLAND", Icon::None));
+                v.push(wd((CX - 158.0, Y0 + 286.0, 316.0, 30.0), Act::Quit, "Keluar dari DYLAND", Icon::None));
             }
             _ => {}
         }
@@ -1138,6 +1208,35 @@ impl App {
             Act::ClipClear => {
                 self.clips.clear();
             }
+            Act::ShelfOpen(i) => {
+                let list = web::shelf_list(&self.web_shared);
+                if let Some(f) = list.get(i) {
+                    sys::shell_open(&f.path);
+                }
+            }
+            Act::ShelfDel(i) => {
+                web::remove_shelf(&self.web_shared, i);
+            }
+            Act::ShelfClear => {
+                web::clear_shelf(&self.web_shared);
+            }
+            Act::PhoneToggle => {
+                if self.web.is_some() {
+                    self.stop_phone();
+                } else {
+                    self.start_phone();
+                }
+            }
+            Act::PhoneNewPin => {
+                web::new_pin(&self.web_shared);
+                self.update_qr();
+                self.say("PIN baru dibuat", 2.0);
+            }
+            Act::OpenInbox => {
+                let d = web::recv_dir(&self.web_shared);
+                let _ = std::fs::create_dir_all(&d);
+                sys::shell_open(&d);
+            }
             Act::CityBtn => {
                 let p = CITIES.iter().position(|c| *c == self.cfg.city.as_str()).unwrap_or(0) / 10;
                 self.city_page = Some(p);
@@ -1208,6 +1307,104 @@ impl App {
     }
 
     // --- mengetik (tugas) ---------------------------------------------------------------
+    fn start_phone(&mut self) {
+        if self.web.is_some() {
+            return;
+        }
+        web::new_pin(&self.web_shared);
+        match web::start(self.web_shared.clone()) {
+            Some(srv) => {
+                self.web = Some(srv);
+                self.phone_ip = web::local_ip();
+                self.update_qr();
+                self.cfg.phone_on = true;
+                self.cfg.save();
+                self.say("Sambung HP aktif", 2.5);
+            }
+            None => {
+                sys::log("hp: server tidak bisa dimulai (port terpakai?)");
+                self.say("Sambung HP gagal dimulai (lihat log.txt)", 3.5);
+            }
+        }
+        self.dirty = true;
+    }
+
+    fn stop_phone(&mut self) {
+        if let Some(srv) = self.web.take() {
+            srv.stop.store(true, Ordering::Relaxed);
+        }
+        self.qr = None;
+        self.cfg.phone_on = false;
+        self.cfg.save();
+        self.say("Sambung HP dimatikan", 2.0);
+        self.dirty = true;
+    }
+
+    fn update_qr(&mut self) {
+        let port = match &self.web {
+            Some(w) => w.port,
+            None => {
+                self.qr = None;
+                return;
+            }
+        };
+        let ip = match &self.phone_ip {
+            Some(i) => i.clone(),
+            None => {
+                self.qr = None;
+                return;
+            }
+        };
+        let pin = web::get_pin(&self.web_shared);
+        let url = format!("http://{}:{}/#{}", ip, port, pin);
+        self.qr = web::make_qr(&url);
+    }
+
+    fn poll_web(&mut self) {
+        if self.web.is_none() {
+            return;
+        }
+        let (clip, ev) = match self.web_shared.lock() {
+            Ok(mut g) => (g.clip_in.take(), g.event.take()),
+            Err(_) => (None, None),
+        };
+        if let Some(t) = clip {
+            sys::clipboard_set(&t);
+            self.say("Teks dari HP disalin ke clipboard PC", 3.0);
+        }
+        if let Some(e) = ev {
+            sys::beep();
+            self.say(&e, 4.0);
+            self.dirty = true;
+        }
+    }
+
+    fn on_drop(&mut self, h: HDROP) {
+        let mut added = 0;
+        unsafe {
+            let count = DragQueryFileW(h, 0xFFFF_FFFF, null_mut(), 0);
+            for i in 0..count {
+                let len = DragQueryFileW(h, i, null_mut(), 0) as usize;
+                if len == 0 {
+                    continue;
+                }
+                let mut buf = vec![0u16; len + 1];
+                DragQueryFileW(h, i, buf.as_mut_ptr(), (len + 1) as u32);
+                let path = String::from_utf16_lossy(&buf[..len]);
+                if web::add_shelf(&self.web_shared, path) {
+                    added += 1;
+                }
+            }
+            DragFinish(h);
+        }
+        if added > 0 {
+            let msg = format!("{} file masuk ke rak", added);
+            self.say(&msg, 2.5);
+            self.open_page(Feat::Shelf);
+        }
+        self.dirty = true;
+    }
+
     fn begin_input(&mut self) {
         self.input = Some(String::new());
         sys::set_noactivate(self.hwnd, false);
@@ -1284,6 +1481,7 @@ impl App {
             Some(t) => t,
             None => return,
         };
+        web::set_pc_clip(&self.web_shared, &raw);
         let cleaned: String = raw.replace('\r', " ").replace('\n', " ").replace('\t', " ");
         let trimmed = cleaned.trim().to_string();
         if trimmed.is_empty() {
@@ -1519,6 +1717,7 @@ impl App {
         self.update_face(now);
         self.per_second(now);
         self.poll_shot();
+        self.poll_web();
         self.update_drag(mx);
         let height_moving = self.smooth_height();
 
@@ -1764,22 +1963,24 @@ impl App {
         }
         let items = self.ring_items();
         let n = items.len();
+        let cr = if n > 12 { 11.0 } else { 13.5 };
         for (i, f) in items.iter().enumerate() {
             let (x, y, _, _) = centerline(ring_s(i, n), t);
             let hl = self.hl[i.min(15)];
             let active = self.feat_active(*f);
             if active {
-                if let Some(p) = circle_path(x, y, 13.5) {
+                if let Some(p) = circle_path(x, y, cr) {
                     fill(&mut self.pixmap, &p, [ACCENT[0], ACCENT[1], ACCENT[2], (70.0 * fade) as u8], base);
                 }
             }
             if hl > 0.01 {
-                if let Some(p) = circle_path(x, y, 13.5) {
+                if let Some(p) = circle_path(x, y, cr) {
                     fill(&mut self.pixmap, &p, [255, 255, 255, (46.0 * hl * fade) as u8], base);
                 }
             }
             let col = [255u8, 255, 255, ((190.0 + 65.0 * hl) * fade) as u8];
-            let k = t.min(1.15) * 0.82 * (1.0 + 0.16 * hl);
+            let kb = if n > 12 { 0.7 } else { 0.82 };
+            let k = t.min(1.15) * kb * (1.0 + 0.16 * hl);
             let tf = base.pre_translate(x, y).pre_scale(k, k);
             let ic = self.feat_icon(*f);
             draw_icon(&mut self.pixmap, ic, tf, col);
@@ -1814,11 +2015,13 @@ impl App {
             Feat::Calendar => self.paint_calendar(base, ca),
             Feat::Clip => self.paint_clips(ca),
             Feat::Prayer => self.paint_prayer(ca),
+            Feat::Shelf => self.paint_shelf(ca),
+            Feat::Phone => self.paint_phone(base, ca),
             Feat::Traffic => self.paint_traffic(base, ca),
             Feat::Settings => {
                 let dim = [255u8, 255, 255, (130.0 * ca) as u8];
                 self.txt("Fitur di radial", X0 + 16.0, Y0 + 54.0, 11.0, dim);
-                self.txt("Tampilan dan sistem", X0 + 16.0, Y0 + 176.0, 11.0, dim);
+                self.txt("Tampilan dan sistem", X0 + 16.0, Y0 + 208.0, 11.0, dim);
             }
             _ => {}
         }
@@ -2199,6 +2402,92 @@ impl App {
         }
     }
 
+    fn paint_shelf(&mut self, ca: f32) {
+        let white = [255u8, 255, 255, (235.0 * ca) as u8];
+        let dim = [255u8, 255, 255, (130.0 * ca) as u8];
+        let list = web::shelf_list(&self.web_shared);
+        if list.is_empty() {
+            self.txt_c("Rak file masih kosong", CX, Y0 + 100.0, 13.0, dim);
+            self.txt_c("Tarik file ke pulau ini untuk menambahkan", CX, Y0 + 122.0, 11.0, dim);
+            self.txt_c("File di rak bisa diunduh dari HP lewat Sambung HP", CX, Y0 + 140.0, 11.0, dim);
+            return;
+        }
+        for (i, f) in list.iter().enumerate().take(5) {
+            let label = format!("{}  ({})", f.name, fmt_size(f.size));
+            let fitted = self.fit(&label, 12.0, 250.0);
+            self.txt(&fitted, X0 + 24.0, Y0 + 46.0 + (i as f32) * 32.0 + 18.0, 12.0, white);
+        }
+        if list.len() > 5 {
+            let more = format!("+{} file lagi", list.len() - 5);
+            self.txt_c(&more, CX, Y0 + 205.0, 10.0, dim);
+        }
+    }
+
+    fn paint_phone(&mut self, base: Transform, ca: f32) {
+        let white = [255u8, 255, 255, (235.0 * ca) as u8];
+        let dim = [255u8, 255, 255, (130.0 * ca) as u8];
+        let accent = [ACCENT[0], ACCENT[1], ACCENT[2], (255.0 * ca) as u8];
+        if self.web.is_none() {
+            self.txt_c("Kirim file dan teks antara HP dan PC lewat browser", CX, Y0 + 116.0, 12.0, dim);
+            self.txt_c("HP dan PC harus memakai Wi-Fi yang sama", CX, Y0 + 138.0, 11.0, dim);
+            self.txt_c("Nyalakan hanya di jaringan yang kamu percaya", CX, Y0 + 154.0, 11.0, dim);
+            self.txt_c("Windows akan meminta izin Firewall: pilih Izinkan", CX, Y0 + 176.0, 10.0, dim);
+            return;
+        }
+        let port = match &self.web {
+            Some(w) => w.port,
+            None => 0,
+        };
+        let (bx, by, bs) = (X0 + 14.0, Y0 + 48.0, 118.0f32);
+        if let Some(p) = rounded_rect(bx, by, bs, bs, 8.0) {
+            fill(&mut self.pixmap, &p, [255, 255, 255, (255.0 * ca) as u8], base);
+        }
+        let qr = self.qr.clone();
+        match qr {
+            Some((n, cells)) => {
+                let ms = (bs - 18.0) / (n as f32);
+                let mut pb = PathBuilder::new();
+                for r in 0..n {
+                    for c in 0..n {
+                        if cells[r * n + c] {
+                            if let Some(rc) = Rect::from_xywh(
+                                bx + 9.0 + (c as f32) * ms,
+                                by + 9.0 + (r as f32) * ms,
+                                ms,
+                                ms,
+                            ) {
+                                pb.push_rect(rc);
+                            }
+                        }
+                    }
+                }
+                if let Some(p) = pb.finish() {
+                    fill(&mut self.pixmap, &p, [0, 0, 0, (255.0 * ca) as u8], base);
+                }
+            }
+            None => {
+                self.txt_c("QR tidak tersedia", bx + bs / 2.0, by + bs / 2.0, 10.0, [60, 60, 60, (255.0 * ca) as u8]);
+            }
+        }
+        let tx = X0 + 144.0;
+        self.txt("Buka di browser HP:", tx, Y0 + 62.0, 11.0, dim);
+        let url = match &self.phone_ip {
+            Some(ip) => format!("http://{}:{}", ip, port),
+            None => String::from("Tidak terhubung ke jaringan"),
+        };
+        let fu = self.fit(&url, 12.0, 184.0);
+        self.txt(&fu, tx, Y0 + 80.0, 12.0, white);
+        self.txt("atau pindai kode QR di kiri", tx, Y0 + 96.0, 10.0, dim);
+        self.txt("PIN", tx, Y0 + 114.0, 11.0, dim);
+        let pin = web::get_pin(&self.web_shared);
+        self.txt(&pin, tx, Y0 + 134.0, 22.0, accent);
+        let last = web::last_inbox(&self.web_shared);
+        self.txt("Terakhir diterima dari HP:", X0 + 16.0, Y0 + 184.0, 11.0, dim);
+        let name = last.unwrap_or_else(|| String::from("-"));
+        let nf = self.fit(&name, 12.0, 300.0);
+        self.txt(&nf, X0 + 16.0, Y0 + 200.0, 12.0, white);
+    }
+
     fn paint_hud(&mut self, base: Transform) {
         let (kind, value, until) = match self.hud {
             Some(h) => h,
@@ -2375,6 +2664,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam:
             with_app(|a| a.cancel_input());
             0
         }
+        0x0233 => {
+            let h = wparam as HDROP;
+            with_app(|a| a.on_drop(h));
+            0
+        }
         0x031D => {
             with_app(|a| a.on_clipboard());
             0
@@ -2450,7 +2744,13 @@ fn main() {
             *cell.borrow_mut() = Some(app);
         });
         AddClipboardFormatListener(hwnd);
-        with_app(|a| a.refresh());
+        winapi::um::shellapi::DragAcceptFiles(hwnd, 1);
+        with_app(|a| {
+            if a.cfg.phone_on {
+                a.start_phone();
+            }
+            a.refresh();
+        });
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         SetTimer(hwnd, 1, 30, None);
 
